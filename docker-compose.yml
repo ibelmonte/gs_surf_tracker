@@ -3,7 +3,7 @@ services:
     build: .
     container_name: tracker
     environment:
-      - VIDEO_SOURCE=/app/input.mp4
+      - VIDEO_SOURCE=/app/data/input.mp4
     volumes:
-      - ./input.mp4:/app/input.mp4
-    restart: unless-stopped
+      - ./data:/app/data
+    #restart: unless-stopped
