@@ -1,0 +1,9 @@
+services:
+  tracker:
+    build: .
+    container_name: tracker
+    environment:
+      - VIDEO_SOURCE=/app/input.mp4
+    volumes:
+      - ./input.mp4:/app/input.mp4
+    restart: unless-stopped
