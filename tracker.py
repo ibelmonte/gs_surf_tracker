@@ -1,12 +1,13 @@
+import os
+import math
+import time
+from collections import deque
+
 import cv2
 import numpy as np
-import math
-import os
-from collections import deque
-import time
 from ultralytics import YOLO
+from ultralytics.utils.checks import check_yaml
 import json
-import csv
 
 
 # -----------------------------------------------------------
@@ -16,31 +17,38 @@ import csv
 VIDEO_SOURCE = os.getenv("VIDEO_SOURCE", "/app/data/input.mp4")
 
 try:
-    VIDEO_SOURCE = int(VIDEO_SOURCE)
+    VIDEO_SOURCE = int(VIDEO_SOURCE)  # webcam index
 except ValueError:
-    pass
+    pass  # treat as path or URL
 
-OUTPUT_PATH = "/app/data/output.mp4"
-CSV_PATH = "/app/data/turns.csv"
-JSON_PATH = "/app/data/turns.json"
+DATA_DIR = "/app/data"
+OUTPUT_DIR = os.path.join(DATA_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+OUTPUT_VIDEO_PATH = os.path.join(OUTPUT_DIR, "output.mp4")
 
 # Turn detection parameters
 CONF_THRESHOLD = 0.4
 ANGLE_WINDOW = 5
-MIN_TURN_ANGLE_DEG = 45
-MIN_TURN_SPEED_DEG_PER_S = 25
-TURN_SUSTAIN_FRAMES = 6
-MIN_FRAMES_BETWEEN_TURNS = 15
-BUFFER_SIZE = 70
+MIN_TURN_ANGLE_DEG = 45          # minimum turn angle (deg)
+MIN_TURN_SPEED_DEG_PER_S = 25    # minimum angular speed (deg/s)
+TURN_SUSTAIN_FRAMES = 6          # frames in which direction must be consistent
+MIN_FRAMES_BETWEEN_TURNS = 15    # per-surfer anti-spam
+BUFFER_SIZE = 70                  # per-surfer trajectory buffer
 
 
 # -----------------------------------------------------------
-# LOAD YOLOv8
+# LOAD YOLOv8 MODEL + BoTSORT CONFIG
 # -----------------------------------------------------------
 
 print("[INFO] Loading YOLOv8 model...")
 model = YOLO("yolov8n.pt")
-print("[INFO] Model loaded.")
+print("[INFO] YOLOv8 loaded.")
+
+# Load BoTSORT tracker config from local YAML
+BOT_SORT_YAML_PATH = "/app/botsort.yaml"
+tracker_cfg = check_yaml(BOT_SORT_YAML_PATH)
+print(f"[INFO] Using BoTSORT config: {BOT_SORT_YAML_PATH}")
 
 
 # -----------------------------------------------------------
@@ -56,7 +64,7 @@ if not cap.isOpened():
 
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps == 0 or fps != fps:
-    fps = 30.0
+    fps = 25.0
 
 frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -65,74 +73,84 @@ print(f"[INFO] Resolution: {frame_w}x{frame_h}, FPS: {fps}")
 
 
 # -----------------------------------------------------------
-# OUTPUT VIDEO
+# OUTPUT VIDEO WRITER
 # -----------------------------------------------------------
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (frame_w, frame_h))
+out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, fps, (frame_w, frame_h))
 
-print(f"[INFO] Exporting video → {OUTPUT_PATH}")
+print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 
 
 # -----------------------------------------------------------
-# STATE
+# PER-SURFER STATE (track_id from BoTSORT)
 # -----------------------------------------------------------
 
-trajectory = deque(maxlen=BUFFER_SIZE)
-angles_smooth = deque(maxlen=BUFFER_SIZE)
-timestamps = deque(maxlen=BUFFER_SIZE)
+# track_id → state
+# state = {
+#   "trajectory": deque[(cx, cy)],
+#   "angles": deque[float],
+#   "timestamps": deque[float],
+#   "turn_count": int,
+#   "last_turn_frame": int,
+#   "events": [ ... ],
+# }
 
-turn_count = 0
-last_turn_frame = -999
+track_states = {}
 frame_idx = 0
 start_time = time.time()
 
-turn_events = []
-
 
 # -----------------------------------------------------------
-# TURN DETECTOR
+# TURN DETECTION (PER-SURFER)
 # -----------------------------------------------------------
 
-def detect_turn(angles, times):
-    global last_turn_frame, frame_idx
-
+def detect_turn(angles, times, last_turn_frame, current_frame_idx):
+    """
+    Robust turn detector:
+      - requires consistent angular direction
+      - requires minimum angle magnitude
+      - requires minimum angular speed
+      - per-track anti-spam
+    angles, times are plain Python lists here.
+    """
     if len(angles) < 12:
-        return False, None, None
+        return False, last_turn_frame, None, None, None
 
     window = np.array(angles[-12:])
     t = np.array(times[-12:])
 
     dtheta = np.diff(window)
     dt = np.diff(t)
+    dt[dt == 0] = 1e-6
     angular_speed = np.abs(dtheta / dt)
 
-    # sustained turning
+    # 1) Sustained turning direction
     recent_signs = np.sign(dtheta[-TURN_SUSTAIN_FRAMES:])
-    sustained = np.sum(recent_signs == recent_signs[-1]) >= TURN_SUSTAIN_FRAMES - 1
+    sustained = np.sum(recent_signs == recent_signs[-1]) >= (TURN_SUSTAIN_FRAMES - 1)
     if not sustained:
-        return False, None, None
+        return False, last_turn_frame, None, None, None
 
-    # magnitude
+    # 2) Angle magnitude over sustain window
     angle_change = window[-1] - window[-TURN_SUSTAIN_FRAMES]
     abs_angle = abs(angle_change)
     if abs_angle < math.radians(MIN_TURN_ANGLE_DEG):
-        return False, None, None
+        return False, last_turn_frame, None, None, None
 
-    # speed
+    # 3) Angular speed threshold
     if np.mean(angular_speed[-TURN_SUSTAIN_FRAMES:]) < math.radians(MIN_TURN_SPEED_DEG_PER_S):
-        return False, None, None
+        return False, last_turn_frame, None, None, None
 
-    # anti-spam
-    if frame_idx - last_turn_frame < MIN_FRAMES_BETWEEN_TURNS:
-        return False, None, None
+    # 4) Anti-spam (per surfer)
+    if current_frame_idx - last_turn_frame < MIN_FRAMES_BETWEEN_TURNS:
+        return False, last_turn_frame, None, None, None
 
-    last_turn_frame = frame_idx
+    new_last_turn_frame = current_frame_idx
 
-    # direction (left/right)
+    # Direction of the turn
     direction = "left" if angle_change > 0 else "right"
 
-    # severity
+    # Severity
     angle_deg = math.degrees(abs_angle)
     if angle_deg < 60:
         severity = "mild"
@@ -141,14 +159,14 @@ def detect_turn(angles, times):
     else:
         severity = "strong"
 
-    return True, direction, severity
+    return True, new_last_turn_frame, direction, severity, angle_deg
 
 
 # -----------------------------------------------------------
 # MAIN LOOP
 # -----------------------------------------------------------
 
-print("[INFO] Starting turn detection...")
+print("[INFO] Starting multi-surfer tracking with BoTSORT...")
 
 while True:
     ret, frame = cap.read()
@@ -156,30 +174,70 @@ while True:
         print("[WARN] End of video.")
         break
 
-    results = model(frame, verbose=False)[0]
+    # YOLOv8 tracking with BoTSORT (via YAML config)
+    results = model.track(
+        frame,
+        persist=True,
+        tracker=tracker_cfg,
+        conf=CONF_THRESHOLD,
+        verbose=False,
+    )
 
-    detections = []
-    for box in results.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        conf = float(box.conf[0])
-        cls = int(box.cls[0])
-        detections.append([x1, y1, x2, y2, conf, cls])
+    any_turn_detected = False
 
-    persons = [d for d in detections if d[5] == 0]
+    if not results:
+        out.write(frame)
+        frame_idx += 1
+        continue
 
-    cx = cy = None
-    best_box = None
+    result = results[0]
 
-    # pick the largest "person"
-    if len(persons) > 0:
-        best_box = max(persons, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
-        x1, y1, x2, y2, conf, cls = best_box
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
+    if not result.boxes:
+        out.write(frame)
+        frame_idx += 1
+        continue
 
-    turn_detected = False
+    boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+    classes = result.boxes.cls.int().cpu().tolist()
+    ids = result.boxes.id
 
-    if cx is not None:
+    if ids is None:
+        out.write(frame)
+        frame_idx += 1
+        continue
+
+    track_ids = ids.int().cpu().tolist()
+
+    # -------------------------------------------------------
+    # PROCESS EACH DETECTED PERSON (SURFER)
+    # -------------------------------------------------------
+    for box, cls, track_id in zip(boxes_xyxy, classes, track_ids):
+        # Keep only "person" class
+        if cls != 0:
+            continue
+
+        x1, y1, x2, y2 = box
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+
+        # Get or create state for this surfer (track_id from BoTSORT)
+        state = track_states.get(track_id)
+        if state is None:
+            state = {
+                "trajectory": deque(maxlen=BUFFER_SIZE),
+                "angles": deque(maxlen=BUFFER_SIZE),
+                "timestamps": deque(maxlen=BUFFER_SIZE),
+                "turn_count": 0,
+                "last_turn_frame": -9999,
+                "events": [],
+            }
+            track_states[track_id] = state
+
+        trajectory = state["trajectory"]
+        angles = state["angles"]
+        timestamps = state["timestamps"]
+
+        # Update trajectory & timestamps
         trajectory.append((cx, cy))
         timestamps.append(time.time())
 
@@ -187,28 +245,32 @@ while True:
             (px, py), (nx, ny) = trajectory[-2], trajectory[-1]
             dx = nx - px
             dy = ny - py
+
+            # Motion angle
             angle = math.atan2(dy, dx)
-            angles_smooth.append(angle)
+            angles.append(angle)
 
-            if len(angles_smooth) >= ANGLE_WINDOW:
-                win = list(angles_smooth)[-ANGLE_WINDOW:]
-                smoothed = sum(win) / len(win)
-                angles_smooth.pop()
-                angles_smooth.append(smoothed)
+            # Smooth angle with sliding window (convert deque → list for slicing)
+            if len(angles) >= ANGLE_WINDOW:
+                window = list(angles)[-ANGLE_WINDOW:]
+                smoothed = sum(window) / len(window)
+                angles.pop()
+                angles.append(smoothed)
 
-            detected, direction, severity = detect_turn(
-                list(angles_smooth),
-                list(timestamps)
+            # Turn detection for this surfer
+            detected, new_last_turn_frame, direction, severity, angle_deg = detect_turn(
+                list(angles),
+                list(timestamps),
+                state["last_turn_frame"],
+                frame_idx,
             )
 
             if detected:
-                turn_count += 1
-                turn_detected = True
+                state["last_turn_frame"] = new_last_turn_frame
+                state["turn_count"] += 1
+                any_turn_detected = True
 
                 timestamp = time.time() - start_time
-                angle_deg = math.degrees(
-                    abs(angles_smooth[-1] - angles_smooth[-TURN_SUSTAIN_FRAMES])
-                )
 
                 event = {
                     "frame": frame_idx,
@@ -217,54 +279,100 @@ while True:
                     "severity": severity,
                     "angle_degrees": angle_deg,
                 }
-                turn_events.append(event)
+                state["events"].append(event)
 
-                print(f"[TURN] frame={frame_idx}, time={timestamp:.2f}s, "
-                      f"turn={turn_count}, {direction}, {severity}, {angle_deg:.1f}°")
+                print(
+                    f"[TURN] surfer_id={track_id}, frame={frame_idx}, "
+                    f"time={timestamp:.2f}s, total_turns={state['turn_count']}, "
+                    f"{direction}, {severity}, {angle_deg:.1f}°"
+                )
 
-    # -------------------------------------------------------
-    # DRAW OVERLAYS
-    # -------------------------------------------------------
+        # ---------------------------------------------------
+        # DRAW OVERLAY FOR THIS SURFER (track_id)
+        # ---------------------------------------------------
+        x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
 
-    # bounding box + counter
-    if best_box is not None:
-        x1, y1, x2, y2, conf, cls = best_box
-        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+        # bounding box
+        cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 255, 0), 2)
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label_id = f"ID: {track_id}"
+        label_turns = f"Turns: {state['turn_count']}"
 
-        label = f"Turns: {turn_count}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        cv2.rectangle(frame, (x1, y1), (x1 + tw + 10, y1 + th + 10), (0, 255, 0), -1)
-        cv2.putText(frame, label, (x1 + 5, y1 + th),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        (tw1, th1), _ = cv2.getTextSize(label_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        (tw2, th2), _ = cv2.getTextSize(label_turns, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
 
-    # TURN! flash
-    if turn_detected:
-        cv2.putText(frame, "TURN!", (frame_w // 2 - 80, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+        box_w = max(tw1, tw2) + 16
+        box_h = th1 + th2 + 20
+
+        overlay_x1 = x1i
+        overlay_y1 = max(0, y1i - box_h)
+        overlay_x2 = overlay_x1 + box_w
+        overlay_y2 = overlay_y1 + box_h
+
+        cv2.rectangle(
+            frame,
+            (overlay_x1, overlay_y1),
+            (overlay_x2, overlay_y2),
+            (0, 255, 0),
+            -1,
+        )
+
+        cv2.putText(
+            frame,
+            label_id,
+            (overlay_x1 + 8, overlay_y1 + th1 + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+
+        cv2.putText(
+            frame,
+            label_turns,
+            (overlay_x1 + 8, overlay_y1 + th1 + th2 + 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+
+    # Global TURN! flash if any surfer turned in this frame
+    if any_turn_detected:
+        cv2.putText(
+            frame,
+            "TURN!",
+            (frame_w // 2 - 80, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            2,
+            (0, 0, 255),
+            4,
+        )
 
     out.write(frame)
     frame_idx += 1
 
 
 # -----------------------------------------------------------
-# SAVE CSV + JSON
+# EXPORT PER-SURFER JSON FILES
 # -----------------------------------------------------------
 
 cap.release()
 out.release()
 
-with open(CSV_PATH, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=[
-        "frame", "timestamp", "direction", "severity", "angle_degrees"
-    ])
-    writer.writeheader()
-    writer.writerows(turn_events)
+print("[INFO] Saving per-surfer JSON files...")
 
-with open(JSON_PATH, "w") as f:
-    json.dump(turn_events, f, indent=4)
+for track_id, state in track_states.items():
+    json_path = os.path.join(OUTPUT_DIR, f"turns-{track_id}.json")
+    data = {
+        "id": track_id,
+        "total_turns": state["turn_count"],
+        "events": state["events"],
+    }
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=4)
 
-print(f"[INFO] CSV saved → {CSV_PATH}")
-print(f"[INFO] JSON saved → {JSON_PATH}")
-print(f"[INFO] Total turns detected: {turn_count}")
+    print(f"[INFO] JSON saved for surfer {track_id} → {json_path}")
+
+print(f"[INFO] Final video → {OUTPUT_VIDEO_PATH}")
+print(f"[INFO] Total surfers tracked (track IDs): {len(track_states)}")
