@@ -223,6 +223,11 @@ while True:
         # Get or create state for this surfer (track_id from BoTSORT)
         state = track_states.get(track_id)
         if state is None:
+            # Create directory structure for this surfer
+            surfer_dir = os.path.join(OUTPUT_DIR, "elements", str(track_id))
+            pictures_dir = os.path.join(surfer_dir, "pictures")
+            os.makedirs(pictures_dir, exist_ok=True)
+
             state = {
                 "trajectory": deque(maxlen=BUFFER_SIZE),
                 "angles": deque(maxlen=BUFFER_SIZE),
@@ -230,6 +235,8 @@ while True:
                 "turn_count": 0,
                 "last_turn_frame": -9999,
                 "events": [],
+                "surfer_dir": surfer_dir,
+                "pictures_dir": pictures_dir,
             }
             track_states[track_id] = state
 
@@ -280,6 +287,10 @@ while True:
                     "angle_degrees": angle_deg,
                 }
                 state["events"].append(event)
+
+                # Save frame capture at the moment of turn detection
+                picture_path = os.path.join(state["pictures_dir"], f"{frame_idx}.png")
+                cv2.imwrite(picture_path, frame)
 
                 print(
                     f"[TURN] surfer_id={track_id}, frame={frame_idx}, "
@@ -363,7 +374,7 @@ out.release()
 print("[INFO] Saving per-surfer JSON files...")
 
 for track_id, state in track_states.items():
-    json_path = os.path.join(OUTPUT_DIR, f"turns-{track_id}.json")
+    json_path = os.path.join(state["surfer_dir"], "turns.json")
     data = {
         "id": track_id,
         "total_turns": state["turn_count"],

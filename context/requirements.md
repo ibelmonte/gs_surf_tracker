@@ -150,10 +150,18 @@ project/
   ├── data/
   │     ├── input.mp4
   │     └── output/
-  │           ├── output.mp4
-  │           ├── turns-1.json
-  │           ├── turns-2.json
-  │           └── ...
+  │             ├── output.mp4                         # Annotated video
+  │             └── elements/
+  │                ├── 1/                              # Surfer ID 1
+  │                │   ├── pictures/
+  │                │   │   ├── 136.png                 # Frame capture at turn
+  │                │   │   ├── 171.png
+  │                │   │   └── ...
+  │                │   └── turns.json                  # Turn data
+  │                ├── 2/                              # Surfer ID 2
+  │                │   ├── pictures/
+  │                │   └── turns.json
+  │                └── ...
   ├── Dockerfile
   └── docker-compose.yml
 ```
