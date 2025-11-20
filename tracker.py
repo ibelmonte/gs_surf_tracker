@@ -1,46 +1,52 @@
 import cv2
-import torch
 import numpy as np
 import math
 import os
 from collections import deque
 import time
+from ultralytics import YOLO
+import json
+import csv
 
 
 # -----------------------------------------------------------
-# READ VIDEO SOURCE FROM ENV
+# CONFIGURATION
 # -----------------------------------------------------------
-VIDEO_SOURCE = os.getenv("VIDEO_SOURCE", "0")
+
+VIDEO_SOURCE = os.getenv("VIDEO_SOURCE", "/app/data/input.mp4")
 
 try:
-    # Try webcam index (e.g., "0")
     VIDEO_SOURCE = int(VIDEO_SOURCE)
 except ValueError:
-    # Otherwise treat as file path or RTSP URL
     pass
 
+OUTPUT_PATH = "/app/data/output.mp4"
+CSV_PATH = "/app/data/turns.csv"
+JSON_PATH = "/app/data/turns.json"
 
-# -----------------------------------------------------------
-# PARAMETERS
-# -----------------------------------------------------------
-CONF_THRESHOLD = 0.4          # YOLO detection confidence
-ANGLE_WINDOW = 5              # smoothing window for angle
-MIN_TURN_ANGLE_DEG = 25       # angle change to qualify as a turn
-MIN_FRAMES_BETWEEN_TURNS = 10 # avoid double-counting turns
-BUFFER_SIZE = 50              # points kept for the trajectory
-
-
-# -----------------------------------------------------------
-# LOAD YOLOv5s MODEL
-# -----------------------------------------------------------
-print("[INFO] Loading YOLOv5s model...")
-model = torch.hub.load("ultralytics/yolov5", "yolov5s", pretrained=True)
-model.conf = CONF_THRESHOLD
+# Turn detection parameters
+CONF_THRESHOLD = 0.4
+ANGLE_WINDOW = 5
+MIN_TURN_ANGLE_DEG = 45
+MIN_TURN_SPEED_DEG_PER_S = 25
+TURN_SUSTAIN_FRAMES = 6
+MIN_FRAMES_BETWEEN_TURNS = 15
+BUFFER_SIZE = 70
 
 
 # -----------------------------------------------------------
-# OPEN VIDEO SOURCE
+# LOAD YOLOv8
 # -----------------------------------------------------------
+
+print("[INFO] Loading YOLOv8 model...")
+model = YOLO("yolov8n.pt")
+print("[INFO] Model loaded.")
+
+
+# -----------------------------------------------------------
+# OPEN VIDEO
+# -----------------------------------------------------------
+
 print(f"[INFO] Opening video source: {VIDEO_SOURCE}")
 cap = cv2.VideoCapture(VIDEO_SOURCE)
 
@@ -49,119 +55,216 @@ if not cap.isOpened():
     exit(1)
 
 fps = cap.get(cv2.CAP_PROP_FPS)
-if fps == 0 or fps != fps:  # NaN check
+if fps == 0 or fps != fps:
     fps = 30.0
 
-print(f"[INFO] Estimated FPS: {fps}")
+frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+print(f"[INFO] Resolution: {frame_w}x{frame_h}, FPS: {fps}")
 
 
 # -----------------------------------------------------------
-# STATE VARIABLES
+# OUTPUT VIDEO
 # -----------------------------------------------------------
+
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+out = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (frame_w, frame_h))
+
+print(f"[INFO] Exporting video → {OUTPUT_PATH}")
+
+
+# -----------------------------------------------------------
+# STATE
+# -----------------------------------------------------------
+
 trajectory = deque(maxlen=BUFFER_SIZE)
 angles_smooth = deque(maxlen=BUFFER_SIZE)
+timestamps = deque(maxlen=BUFFER_SIZE)
 
 turn_count = 0
 last_turn_frame = -999
 frame_idx = 0
 start_time = time.time()
 
+turn_events = []
+
 
 # -----------------------------------------------------------
-# TURN DETECTION FUNCTION
+# TURN DETECTOR
 # -----------------------------------------------------------
-def detect_turn(angle_list):
-    """Return True if a new turn is detected based on angle change."""
+
+def detect_turn(angles, times):
     global last_turn_frame, frame_idx
 
-    if len(angle_list) < 5:
-        return False
+    if len(angles) < 12:
+        return False, None, None
 
-    recent = np.array(angle_list)[-10:]
+    window = np.array(angles[-12:])
+    t = np.array(times[-12:])
 
-    if len(recent) < 3:
-        return False
+    dtheta = np.diff(window)
+    dt = np.diff(t)
+    angular_speed = np.abs(dtheta / dt)
 
-    prev_a = recent[-3]
-    curr_a = recent[-2]
-    next_a = recent[-1]
+    # sustained turning
+    recent_signs = np.sign(dtheta[-TURN_SUSTAIN_FRAMES:])
+    sustained = np.sum(recent_signs == recent_signs[-1]) >= TURN_SUSTAIN_FRAMES - 1
+    if not sustained:
+        return False, None, None
 
-    # Look for a slope change → potential turn
-    if (curr_a - prev_a) * (next_a - curr_a) < 0:
+    # magnitude
+    angle_change = window[-1] - window[-TURN_SUSTAIN_FRAMES]
+    abs_angle = abs(angle_change)
+    if abs_angle < math.radians(MIN_TURN_ANGLE_DEG):
+        return False, None, None
 
-        angle_diff = abs(curr_a - prev_a)
+    # speed
+    if np.mean(angular_speed[-TURN_SUSTAIN_FRAMES:]) < math.radians(MIN_TURN_SPEED_DEG_PER_S):
+        return False, None, None
 
-        if angle_diff >= math.radians(MIN_TURN_ANGLE_DEG):
+    # anti-spam
+    if frame_idx - last_turn_frame < MIN_FRAMES_BETWEEN_TURNS:
+        return False, None, None
 
-            # Avoid detecting multiple times in rapid sequence
-            if frame_idx - last_turn_frame >= MIN_FRAMES_BETWEEN_TURNS:
-                last_turn_frame = frame_idx
-                return True
+    last_turn_frame = frame_idx
 
-    return False
+    # direction (left/right)
+    direction = "left" if angle_change > 0 else "right"
+
+    # severity
+    angle_deg = math.degrees(abs_angle)
+    if angle_deg < 60:
+        severity = "mild"
+    elif angle_deg < 90:
+        severity = "medium"
+    else:
+        severity = "strong"
+
+    return True, direction, severity
 
 
 # -----------------------------------------------------------
-# MAIN LOOP (HEADLESS)
+# MAIN LOOP
 # -----------------------------------------------------------
-print("[INFO] Starting real-time turn detection (headless mode)...")
+
+print("[INFO] Starting turn detection...")
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("[WARN] Could not read frame. Exiting...")
+        print("[WARN] End of video.")
         break
 
-    # Run YOLOv5 inference
-    results = model(frame)
-    detections = results.xyxy[0].cpu().numpy()
+    results = model(frame, verbose=False)[0]
 
-    # Filter only "person" class (COCO ID: 0)
-    persons = [d for d in detections if int(d[5]) == 0]
+    detections = []
+    for box in results.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        conf = float(box.conf[0])
+        cls = int(box.cls[0])
+        detections.append([x1, y1, x2, y2, conf, cls])
+
+    persons = [d for d in detections if d[5] == 0]
 
     cx = cy = None
+    best_box = None
 
+    # pick the largest "person"
     if len(persons) > 0:
-        # Choose the largest detected person (assumes it's the skier)
-        best = max(persons, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
-        x1, y1, x2, y2, conf, cls = best
-        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-
+        best_box = max(persons, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
+        x1, y1, x2, y2, conf, cls = best_box
         cx = (x1 + x2) / 2
         cy = (y1 + y2) / 2
 
-    # Update trajectory and angle history
+    turn_detected = False
+
     if cx is not None:
         trajectory.append((cx, cy))
+        timestamps.append(time.time())
 
         if len(trajectory) >= 2:
             (px, py), (nx, ny) = trajectory[-2], trajectory[-1]
             dx = nx - px
             dy = ny - py
             angle = math.atan2(dy, dx)
-
             angles_smooth.append(angle)
 
-            # Smooth the angle curve
             if len(angles_smooth) >= ANGLE_WINDOW:
-                window = list(angles_smooth)[-ANGLE_WINDOW:]  # FIXED deque slicing
-                smoothed = sum(window) / len(window)
-
-                # Replace the last angle with the smoothed one
+                win = list(angles_smooth)[-ANGLE_WINDOW:]
+                smoothed = sum(win) / len(win)
                 angles_smooth.pop()
                 angles_smooth.append(smoothed)
 
-            # Detect a turn
-            if detect_turn(list(angles_smooth)):
-                turn_count += 1
-                timestamp = time.time() - start_time
-                print(f"[TURN] frame={frame_idx}, time={timestamp:.2f}s, total_turns={turn_count}")
+            detected, direction, severity = detect_turn(
+                list(angles_smooth),
+                list(timestamps)
+            )
 
+            if detected:
+                turn_count += 1
+                turn_detected = True
+
+                timestamp = time.time() - start_time
+                angle_deg = math.degrees(
+                    abs(angles_smooth[-1] - angles_smooth[-TURN_SUSTAIN_FRAMES])
+                )
+
+                event = {
+                    "frame": frame_idx,
+                    "timestamp": timestamp,
+                    "direction": direction,
+                    "severity": severity,
+                    "angle_degrees": angle_deg,
+                }
+                turn_events.append(event)
+
+                print(f"[TURN] frame={frame_idx}, time={timestamp:.2f}s, "
+                      f"turn={turn_count}, {direction}, {severity}, {angle_deg:.1f}°")
+
+    # -------------------------------------------------------
+    # DRAW OVERLAYS
+    # -------------------------------------------------------
+
+    # bounding box + counter
+    if best_box is not None:
+        x1, y1, x2, y2, conf, cls = best_box
+        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        label = f"Turns: {turn_count}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        cv2.rectangle(frame, (x1, y1), (x1 + tw + 10, y1 + th + 10), (0, 255, 0), -1)
+        cv2.putText(frame, label, (x1 + 5, y1 + th),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
+    # TURN! flash
+    if turn_detected:
+        cv2.putText(frame, "TURN!", (frame_w // 2 - 80, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+
+    out.write(frame)
     frame_idx += 1
 
 
 # -----------------------------------------------------------
-# CLEANUP
+# SAVE CSV + JSON
 # -----------------------------------------------------------
+
 cap.release()
+out.release()
+
+with open(CSV_PATH, "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=[
+        "frame", "timestamp", "direction", "severity", "angle_degrees"
+    ])
+    writer.writeheader()
+    writer.writerows(turn_events)
+
+with open(JSON_PATH, "w") as f:
+    json.dump(turn_events, f, indent=4)
+
+print(f"[INFO] CSV saved → {CSV_PATH}")
+print(f"[INFO] JSON saved → {JSON_PATH}")
 print(f"[INFO] Total turns detected: {turn_count}")
