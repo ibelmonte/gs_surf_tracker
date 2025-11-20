@@ -1,51 +1,182 @@
-# Surf Motion Tracking System --- Functional & Architectural Specification
 
-## 1. Project Goal
+# Surf Multi-Tracker – Project Specification
 
-Build an AI-based video processing pipeline that: - Detects surfers. -
-Tracks each surfer with stable logical IDs. - Detects turning
-maneuvers. - Produces overlayed video and JSON logs. - Runs headless
-inside Docker.
+## 1. Overview
+This system processes surfing videos and performs the following:
+- Detects multiple surfers.
+- Tracks each surfer throughout the wave, even through brief occlusion.
+- Detects turns (direction, severity, timestamps).
+- Generates per-surfer JSON files and a single overlaid output video.
+- Handles vertical and horizontal videos automatically.
 
-## 2. Input / Output Requirements
+---
 
-### Input
+## 2. Input Files
+- **Video file**: `data/input.mp4`
+- Orientation is detected automatically using OpenCV (portrait/landscape).
 
--   `input.mp4` (any orientation).
+---
 
-### Output
+## 3. Output Files
+All outputs are written into:
 
--   `output/output.mp4`
--   `output/turns-<ID>.json`
+```
+data/output/
+```
 
-## 3. Architecture
+### 3.1 Output Video
+```
+output.mp4
+```
+Includes:
+- Bounding boxes for each surfer.
+- Stable logical IDs.
+- Turn count displayed inside bounding box.
 
-1.  YOLOv8 detection
-2.  BoT-SORT tracking
-3.  Logical-ID merging
-4.  Motion/angle analysis
-5.  Overlay & JSON export
+---
 
-## 4. Detection (YOLOv8)
+## 4. JSON Output Format
 
--   Model: yolov8n.pt
--   Class: person
+Each surfer receives a file:
 
-## 5. Tracking (BoT-SORT)
+```
+turns-{logical_id}.json
+```
 
--   Configurable with botsort.yaml
+Example filename:
+```
+turns-3.json
+```
 
-## 6. Logical-ID Stabilization
+### 4.1 JSON Schema
 
--   Maps short-lived tracker IDs to stable IDs.
+```json
+{
+  "id": "integer - stable logical ID",
+  "total_turns": "integer - number of turns in the video clip",
+  "events": [
+    {
+        "frame": "integer",,
+        "timestamp": "float - seconds",
+        "direction": "string - 'left' or 'right'",
+        "severity": "string - 'mild' or 'medium' or 'strong'",
+        "angle_degrees": "float - angle in degrees"
+    }
+}
+```
 
-## 7. Motion Analysis
+---
 
--   Tracks center positions
--   Computes angle deltas
--   Detects turns
+## 4.2 Example JSON File
 
-## 8. Output Subsystem
+**turns-3.json**
+```json
+{
+    "id": 2,
+    "total_turns": 5,
+    "events": [
+        {
+            "frame": 136,
+            "timestamp": 46.999876260757446,
+            "direction": "right",
+            "severity": "mild",
+            "angle_degrees": 57.89830409375186
+        },
+        {
+            "frame": 171,
+            "timestamp": 57.780139207839966,
+            "direction": "left",
+            "severity": "mild",
+            "angle_degrees": 48.62631837461168
+        },
+        {
+            "frame": 210,
+            "timestamp": 68.59231686592102,
+            "direction": "right",
+            "severity": "mild",
+            "angle_degrees": 47.771882528595924
+        },
+        {
+            "frame": 314,
+            "timestamp": 95.95589017868042,
+            "direction": "left",
+            "severity": "mild",
+            "angle_degrees": 47.555916454811204
+        },
+        {
+            "frame": 332,
+            "timestamp": 101.24145531654358,
+            "direction": "right",
+            "severity": "mild",
+            "angle_degrees": 51.241250489677675
+        }
+    ]
+}
+```
 
--   Draws overlays
--   Writes MP4 + JSON
+---
+
+## 5. System Architecture
+
+### 5.1 Components
+- **YOLOv8n**  
+  Detects "person" objects per frame.
+
+- **BoTSORT tracker**  
+  Uses:
+  - Optical flow (sparse)
+  - Appearance embedding (OSNet)
+  - Motion smoothing
+  - Occlusion-aware ID retention
+
+- **Turn Analysis Module**  
+  - Computes angle from the movement vector.
+  - Applies smoothing windows.
+  - Detects local maxima over threshold.
+  - Assigns type based on severity and angle curvature.
+
+- **ID Stabilization Layer**  
+  - Uses appearance matching + angle continuity
+  - Avoids ID jumps during short occlusions
+
+---
+
+## 6. Directory Structure
+
+```
+project/
+  ├── tracker.py
+  ├── botsort.yaml
+  ├── data/
+  │     ├── input.mp4
+  │     └── output/
+  │           ├── output.mp4
+  │           ├── turns-1.json
+  │           ├── turns-2.json
+  │           └── ...
+  ├── Dockerfile
+  └── docker-compose.yml
+```
+
+---
+
+## 7. Docker Runtime
+
+`docker compose up --build`  
+Runs the entire pipeline:
+- Loads model
+- Processes video
+- Writes JSON + video
+
+---
+
+## 8. Future Improvements
+- Wave segmentation (identify wave shape + surfer-to-wave alignment)
+- ReID training on real surf footage
+- Bottom turn classifier using a neural network
+- Speed and acceleration estimation
+- Trick classification (snap, cutback, alley-oop, etc.)
+
+---
+
+This document is intended for consumption by AI coding agents, engineering teams, or automated pipeline generators.
