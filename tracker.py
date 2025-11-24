@@ -11,6 +11,8 @@ from ultralytics import YOLO
 from ultralytics.utils.checks import check_yaml
 import json
 import mediapipe as mp
+from mediapipe.python.solutions import drawing_utils as mp_drawing
+from mediapipe.python.solutions import drawing_styles as mp_drawing_styles
 
 
 # -----------------------------------------------------------
@@ -104,6 +106,9 @@ CONF_THRESHOLD = 0.4
 BUFFER_SIZE = 70                      # per-surfer trajectory buffer
 DEBUG_DETECTION = True                # enable debug output for detection
 MIN_FRAMES_BETWEEN_MANEUVERS = 15     # per-surfer anti-spam between maneuvers
+
+# Pose visualization
+SHOW_POSE_OVERLAY = os.getenv("SHOW_POSE_OVERLAY", "true").lower() in ("true", "1", "yes")
 
 # Bounding box size filtering (to exclude people too close to camera)
 MAX_BOX_WIDTH_RATIO = 0.6             # maximum box width as fraction of frame width (0.0-1.0)
@@ -207,6 +212,7 @@ print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 #   "angles": deque[float],
 #   "timestamps": deque[float],
 #   "pose_features_history": deque[dict],  # history of pose features
+#   "pose_landmarks": None,  # most recent MediaPipe pose landmarks (for drawing)
 #   "maneuver_count": int,
 #   "last_maneuver_frame": int,
 #   "total_distance": float,
@@ -731,6 +737,7 @@ while True:
                 "angles": deque(maxlen=BUFFER_SIZE),
                 "timestamps": deque(maxlen=BUFFER_SIZE),
                 "pose_features_history": deque(maxlen=BUFFER_SIZE),
+                "pose_landmarks": None,
                 "maneuver_count": 0,
                 "last_maneuver_frame": -9999,
                 "total_distance": 0.0,
@@ -767,8 +774,14 @@ while True:
             pose_results = pose_detector.process(roi_rgb)
 
             if pose_results.pose_landmarks:
+                # Store raw pose landmarks for drawing
+                state["pose_landmarks"] = pose_results.pose_landmarks
                 # Extract pose features
                 pose_features = extract_pose_features(pose_results.pose_landmarks, x2i - x1i, y2i - y1i)
+            else:
+                state["pose_landmarks"] = None
+        else:
+            state["pose_landmarks"] = None
 
         # Store pose features (even if None)
         pose_features_history.append(pose_features)
@@ -907,6 +920,27 @@ while True:
 
         # bounding box (x1i, y1i, x2i, y2i already set above)
         cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 255, 0), 2)
+
+        # Draw pose skeleton overlay if enabled and landmarks available
+        if SHOW_POSE_OVERLAY and state["pose_landmarks"] is not None:
+            # Create a copy of ROI to draw on
+            roi_with_pose = frame[y1i:y2i, x1i:x2i].copy()
+
+            # Draw pose landmarks on ROI
+            mp_drawing.draw_landmarks(
+                roi_with_pose,
+                state["pose_landmarks"],
+                mp_pose.POSE_CONNECTIONS,
+                landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
+                connection_drawing_spec=mp_drawing.DrawingSpec(
+                    color=(0, 255, 0),  # Green color to match bounding box
+                    thickness=2,
+                    circle_radius=2
+                )
+            )
+
+            # Overlay the drawn ROI back onto the frame
+            frame[y1i:y2i, x1i:x2i] = roi_with_pose
 
         label_id = f"ID: {track_id}"
         label_maneuvers = f"Maneuvers: {state['maneuver_count']}"
