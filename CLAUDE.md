@@ -4,35 +4,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a surf movement detection and tracking system that processes surfing videos to:
-- Detect and track multiple surfers using YOLOv8n + BoTSORT
-- Identify turning movements
-- Generate per-surfer JSON files with turn events
-- Produce annotated video with bounding boxes and turn counts
-- Capture frame snapshots at each detected turn
+Surf Tracker is a **full-stack web application** for AI-powered surf performance analysis. The system consists of:
+
+1. **Web Application** (Next.js): User registration, authentication, video upload
+2. **API Backend** (FastAPI): RESTful API with background job processing
+3. **Tracker Service** (Python): Computer vision pipeline for surf movement detection
+4. **Database** (PostgreSQL): User data, sessions, and results
+5. **Task Queue** (Celery + Redis): Background video processing
+
+### Key Features
+- User registration with email confirmation
+- Video upload and session management
+- Multi-surfer detection and tracking (YOLOv8n + BoTSORT)
+- Maneuver detection (turns, snaps, cutbacks) with pose analysis (MediaPipe)
+- Per-surfer results with annotated videos and metrics
 
 ## Development Commands
 
-### Running the tracker
+### Running all services
 ```bash
-# Using Docker (recommended)
+# Start all services (API, Website, DB, Redis, Celery)
 docker compose up --build
 
-# Direct Python (requires dependencies installed)
-python tracker.py
+# Start specific service
+docker compose up api
+docker compose up website
 ```
 
-### Dependencies
+### Running services individually
+
+**API (FastAPI)**:
 ```bash
+cd api
 pip install -r requirements.txt
+uvicorn main:app --reload
+# Access at http://localhost:8000
+# API docs at http://localhost:8000/docs
 ```
 
-Required packages:
-- ultralytics (YOLOv8)
-- opencv-python-headless
-- torch
-- numpy
-- lap (for BoTSORT)
+**Website (Next.js)**:
+```bash
+cd website
+npm install
+npm run dev
+# Access at http://localhost:3000
+```
+
+**Tracker (standalone)**:
+```bash
+cd tracker
+pip install -r requirements.txt
+python tracker.py
+# Or with Docker:
+docker build -t tracker .
+docker run --rm -v $(pwd)/data:/app/data tracker
+```
 
 ## Architecture
 
