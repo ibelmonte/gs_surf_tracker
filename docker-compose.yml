@@ -4,6 +4,7 @@ services:
     container_name: tracker
     environment:
       - VIDEO_SOURCE=/app/data/input.mp4
+      - ROTATION=${ROTATION:-}
     volumes:
       - ./data:/app/data
     #restart: unless-stopped

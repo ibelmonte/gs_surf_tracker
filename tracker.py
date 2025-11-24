@@ -2,6 +2,7 @@ import os
 import math
 import time
 import shutil
+import subprocess
 from collections import deque
 
 import cv2
@@ -9,6 +10,75 @@ import numpy as np
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_yaml
 import json
+
+
+# -----------------------------------------------------------
+# VIDEO ROTATION UTILITIES
+# -----------------------------------------------------------
+
+def get_video_rotation(video_path):
+    """
+    Detect rotation metadata from video file using ffprobe.
+    Returns rotation angle (0, 90, 180, or 270).
+    """
+    try:
+        # First try: Check rotation tag
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream_tags=rotate',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(video_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode == 0 and result.stdout.strip():
+            rotation = int(result.stdout.strip())
+            print(f"[INFO] Detected video rotation metadata (rotate tag): {rotation}°")
+            return rotation
+
+        # Second try: Check side_data display matrix
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream_side_data=rotation',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(video_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
+        if result.returncode == 0 and result.stdout.strip():
+            rotation = int(float(result.stdout.strip()))
+            print(f"[INFO] Detected video rotation metadata (side_data): {rotation}°")
+            return rotation
+
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError) as e:
+        print(f"[INFO] Could not detect rotation via ffprobe: {e}")
+
+    print("[INFO] No rotation metadata found, assuming 0°")
+    return 0
+
+
+def rotate_frame(frame, rotation):
+    """
+    Rotate frame based on rotation angle.
+    Rotation metadata indicates how much to rotate for correct display.
+    Handles negative angles: -90 = counterclockwise 90°
+    """
+    # Normalize negative angles to positive equivalents
+    rotation = rotation % 360
+
+    if rotation == 0:
+        return frame
+    elif rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    elif rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    else:
+        print(f"[WARN] Unsupported rotation angle: {rotation}°, not rotating")
+        return frame
 
 
 # -----------------------------------------------------------
@@ -34,6 +104,11 @@ BUFFER_SIZE = 70                      # per-surfer trajectory buffer
 DEBUG_DETECTION = True                # enable debug output for detection
 MIN_FRAMES_BETWEEN_MANEUVERS = 15     # per-surfer anti-spam between maneuvers
 
+# Bounding box size filtering (to exclude people too close to camera)
+MAX_BOX_WIDTH_RATIO = 0.6             # maximum box width as fraction of frame width (0.0-1.0)
+MAX_BOX_HEIGHT_RATIO = 0.6            # maximum box height as fraction of frame height (0.0-1.0)
+MIN_BOX_AREA_PIXELS = 400             # minimum box area to track (avoid tiny detections)
+
 # Activity filtering (prevent stationary surfers from being detected)
 MIN_MOVEMENT_DISTANCE = 100           # minimum total movement distance (pixels) to be considered active
 MIN_ACTIVE_FRAMES = 10                # minimum frames with significant movement to enable detection
@@ -43,27 +118,11 @@ MOVEMENT_THRESHOLD_PER_FRAME = 3      # minimum pixel movement per frame to coun
 MAX_POSITION_JUMP = 150               # maximum pixel jump between frames (to detect ID swaps)
 CONSISTENCY_CHECK_FRAMES = 5          # frames to check for trajectory consistency
 
-# Drop detection parameters (initial descent after catching wave)
-MIN_DROP_DISTANCE_PIXELS = 15         # minimum vertical descent in pixels
-MIN_DROP_VELOCITY_PX_PER_S = 8        # minimum downward speed (pixels/second)
-DROP_SUSTAIN_FRAMES = 4               # frames of sustained downward movement
-
-# Turn detection parameters (bottom turn, snap, cutback)
+# Turn detection parameters
 ANGLE_WINDOW = 5                      # smoothing window for angle calculation
-MIN_TURN_ANGLE_DEG = 45               # minimum angle change to detect any turn
+MIN_TURN_ANGLE_DEG = 45               # minimum angle change to detect a turn
 TURN_SUSTAIN_FRAMES = 5               # frames of consistent turning direction
 MIN_TURN_SPEED_DEG_PER_S = 25         # minimum angular speed (deg/s)
-
-# Maneuver classification based on characteristics (not just position)
-# SNAP: Explosive, sharp turn (high speed + sharp angle)
-MIN_SNAP_ANGLE_DEG = 55               # minimum angle for snap
-MIN_SNAP_SPEED_DEG_PER_S = 40         # high angular speed = explosive/snap
-
-# CUTBACK: Large directional change (turning back toward wave)
-MIN_CUTBACK_ANGLE_DEG = 85            # large angle change (was 120, too high)
-
-# BOTTOM TURN: Default turn that doesn't fit snap/cutback criteria
-MIN_BOTTOM_TURN_ANGLE_DEG = 45        # minimum angle for bottom turn
 
 
 # -----------------------------------------------------------
@@ -91,6 +150,14 @@ if not cap.isOpened():
     print("[ERROR] Cannot open video source.")
     exit(1)
 
+# Detect video rotation metadata (can be overridden with ROTATION env var)
+rotation_override = os.getenv("ROTATION")
+if rotation_override and rotation_override.strip():
+    rotation = int(rotation_override)
+    print(f"[INFO] Using manual rotation override: {rotation}°")
+else:
+    rotation = get_video_rotation(VIDEO_SOURCE)
+
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps == 0 or fps != fps:
     fps = 25.0
@@ -98,7 +165,13 @@ if fps == 0 or fps != fps:
 frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-print(f"[INFO] Resolution: {frame_w}x{frame_h}, FPS: {fps}")
+# Normalize rotation and adjust dimensions if video is rotated 90° or 270°
+rotation_normalized = rotation % 360
+if rotation_normalized in (90, 270):
+    frame_w, frame_h = frame_h, frame_w
+    print(f"[INFO] Resolution (after {rotation}° rotation): {frame_w}x{frame_h}, FPS: {fps}")
+else:
+    print(f"[INFO] Resolution: {frame_w}x{frame_h}, FPS: {fps}")
 
 
 # -----------------------------------------------------------
@@ -122,9 +195,6 @@ print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 #   "timestamps": deque[float],
 #   "maneuver_count": int,
 #   "last_maneuver_frame": int,
-#   "drop_detected": bool,
-#   "min_y": float,
-#   "max_y": float,
 #   "total_distance": float,
 #   "active_frames": int,
 #   "is_active": bool,
@@ -172,68 +242,22 @@ def is_trajectory_consistent(trajectory):
 # MANEUVER DETECTION (PER-SURFER)
 # -----------------------------------------------------------
 
-def detect_maneuver(trajectory, angles, times, last_maneuver_frame, current_frame_idx,
-                    drop_detected, min_y, max_y, track_id=None):
+def detect_maneuver(trajectory, angles, times, last_maneuver_frame, current_frame_idx, track_id=None):
     """
-    Detects surfing maneuvers based on trajectory patterns.
-    Detects: Drop, Bottom Turn, Snap, Cutback
+    Detects generic turns based on trajectory patterns.
 
-    Returns: (detected, new_last_maneuver_frame, maneuver_type, metrics_dict, new_drop_detected)
+    Returns: (detected, new_last_maneuver_frame, maneuver_type, metrics_dict)
     """
 
     # Anti-spam check first
     if current_frame_idx - last_maneuver_frame < MIN_FRAMES_BETWEEN_MANEUVERS:
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
-    # --- PRIORITY 1: DROP DETECTION (only if not yet detected) ---
-    if not drop_detected and len(trajectory) >= DROP_SUSTAIN_FRAMES + 2:
-        # Extract Y positions from trajectory
-        y_positions = [pos[1] for pos in trajectory]
-        y_array = np.array(y_positions)
-        t_array = np.array(times)
-
-        # Calculate vertical velocity
-        dy = np.diff(y_array)
-        dt = np.diff(t_array)
-        dt[dt == 0] = 1e-6
-        vertical_velocity = dy / dt
-
-        if len(vertical_velocity) >= DROP_SUSTAIN_FRAMES:
-            recent_velocity = vertical_velocity[-DROP_SUSTAIN_FRAMES:]
-            recent_dy = dy[-DROP_SUSTAIN_FRAMES:]
-
-            downward_frames = np.sum(recent_dy > 0)
-            total_drop_distance = np.sum(recent_dy[recent_dy > 0])
-            avg_velocity = np.mean(np.abs(recent_velocity))
-
-            # Check all drop criteria
-            if (downward_frames >= DROP_SUSTAIN_FRAMES - 1 and
-                total_drop_distance >= MIN_DROP_DISTANCE_PIXELS and
-                avg_velocity >= MIN_DROP_VELOCITY_PX_PER_S):
-
-                # Drop detected!
-                max_velocity = np.max(np.abs(recent_velocity))
-                duration = t_array[-1] - t_array[-DROP_SUSTAIN_FRAMES]
-
-                metrics = {
-                    "distance_pixels": float(total_drop_distance),
-                    "max_velocity_px_s": float(max_velocity),
-                    "avg_velocity_px_s": float(avg_velocity),
-                    "duration_seconds": float(duration),
-                }
-
-                if DEBUG_DETECTION and track_id is not None:
-                    print(f"[DROP DETECTED] ID={track_id}, frame={current_frame_idx}, "
-                          f"distance={total_drop_distance:.1f}px, vel={avg_velocity:.1f}px/s")
-
-                return True, current_frame_idx, "drop", metrics, True  # Set drop_detected to True
-
-    # --- PRIORITY 2: TURN DETECTION (Bottom Turn, Snap, Cutback) ---
+    # Check if we have enough data
     if len(angles) < TURN_SUSTAIN_FRAMES + 2:
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
     # Ensure angles and times have matching lengths
-    # (angles can be shorter than times since they're derived from trajectory pairs)
     min_len = min(len(angles), len(times))
     angles_array = np.array(angles[-min_len:])
     t_array = np.array(times[-min_len:])
@@ -249,12 +273,12 @@ def detect_maneuver(trajectory, angles, times, last_maneuver_frame, current_fram
 
     # 1) Check for sustained turning direction
     if len(dtheta) < TURN_SUSTAIN_FRAMES:
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
     recent_signs = np.sign(dtheta[-TURN_SUSTAIN_FRAMES:])
     sustained = np.sum(recent_signs == recent_signs[-1]) >= (TURN_SUSTAIN_FRAMES - 1)
     if not sustained:
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
     # 2) Calculate angle magnitude
     angle_change = window[-1] - window[-TURN_SUSTAIN_FRAMES]
@@ -262,72 +286,29 @@ def detect_maneuver(trajectory, angles, times, last_maneuver_frame, current_fram
     angle_deg = math.degrees(abs_angle)
 
     if angle_deg < MIN_TURN_ANGLE_DEG:
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
     # 3) Check angular speed
     if np.mean(angular_speed[-TURN_SUSTAIN_FRAMES:]) < math.radians(MIN_TURN_SPEED_DEG_PER_S):
-        return False, last_maneuver_frame, None, None, drop_detected
+        return False, last_maneuver_frame, None, None
 
-    # --- CLASSIFY TURN TYPE based on angle and speed (not position) ---
-
-    # Direction
+    # Turn detected!
     direction = "left" if angle_change > 0 else "right"
-
-    # Calculate average angular speed
     avg_angular_speed_rad = np.mean(angular_speed[-TURN_SUSTAIN_FRAMES:])
     avg_angular_speed_deg = math.degrees(avg_angular_speed_rad)
 
-    # Enhanced debug output
     if DEBUG_DETECTION and track_id is not None:
-        current_y = trajectory[-1][1]
-        y_range = max_y - min_y if max_y > min_y else 1.0
-        relative_position = (current_y - min_y) / y_range
-        print(f"[TURN ANALYSIS] ID={track_id}, frame={current_frame_idx}: "
+        print(f"[TURN DETECTED] ID={track_id}, frame={current_frame_idx}: "
               f"angle={angle_deg:.1f}°, ang_speed={avg_angular_speed_deg:.1f}°/s, "
-              f"pos={relative_position:.2f}")
-
-    # Classify maneuver based on characteristics
-    maneuver_type = None
-
-    # Priority 1: SNAP - Explosive turn (high speed + sharp angle)
-    if (avg_angular_speed_deg >= MIN_SNAP_SPEED_DEG_PER_S and
-        angle_deg >= MIN_SNAP_ANGLE_DEG):
-        maneuver_type = "snap"
-        if DEBUG_DETECTION and track_id is not None:
-            print(f"  → SNAP (speed {avg_angular_speed_deg:.1f}°/s >= {MIN_SNAP_SPEED_DEG_PER_S}°/s, "
-                  f"angle {angle_deg:.1f}° >= {MIN_SNAP_ANGLE_DEG}°)")
-
-    # Priority 2: CUTBACK - Large directional change
-    elif angle_deg >= MIN_CUTBACK_ANGLE_DEG:
-        maneuver_type = "cutback"
-        if DEBUG_DETECTION and track_id is not None:
-            print(f"  → CUTBACK (angle {angle_deg:.1f}° >= {MIN_CUTBACK_ANGLE_DEG}°)")
-
-    # Priority 3: BOTTOM TURN - Standard turn
-    elif angle_deg >= MIN_BOTTOM_TURN_ANGLE_DEG:
-        maneuver_type = "bottom_turn"
-        if DEBUG_DETECTION and track_id is not None:
-            print(f"  → BOTTOM_TURN (angle {angle_deg:.1f}° >= {MIN_BOTTOM_TURN_ANGLE_DEG}°)")
-
-    else:
-        # Angle too small, not classified
-        if DEBUG_DETECTION and track_id is not None:
-            print(f"  → NOT classified (angle {angle_deg:.1f}° < {MIN_BOTTOM_TURN_ANGLE_DEG}°)")
-        return False, last_maneuver_frame, None, None, drop_detected
-
-    # Turn detected and classified!
-    current_y = trajectory[-1][1]
-    y_range = max_y - min_y if max_y > min_y else 1.0
-    relative_position = (current_y - min_y) / y_range
+              f"dir={direction}")
 
     metrics = {
         "angle_degrees": float(angle_deg),
         "direction": direction,
         "angular_speed_deg_s": float(avg_angular_speed_deg),
-        "position_relative": float(relative_position),
     }
 
-    return True, current_frame_idx, maneuver_type, metrics, drop_detected
+    return True, current_frame_idx, "turn", metrics
 
 
 # -----------------------------------------------------------
@@ -341,6 +322,9 @@ while True:
     if not ret:
         print("[WARN] End of video.")
         break
+
+    # Apply rotation if needed
+    frame = rotate_frame(frame, rotation)
 
     # YOLOv8 tracking with BoTSORT (via YAML config)
     results = model.track(
@@ -385,6 +369,29 @@ while True:
             continue
 
         x1, y1, x2, y2 = box
+
+        # Apply bounding box size filtering
+        box_width = x2 - x1
+        box_height = y2 - y1
+        box_area = box_width * box_height
+
+        width_ratio = box_width / frame_w
+        height_ratio = box_height / frame_h
+
+        # Skip if box is too large (person too close to camera)
+        if width_ratio > MAX_BOX_WIDTH_RATIO or height_ratio > MAX_BOX_HEIGHT_RATIO:
+            if DEBUG_DETECTION:
+                print(f"[FILTER] Skipping track_id={track_id}: Box too large "
+                      f"(w={width_ratio:.2f}, h={height_ratio:.2f}), likely not a surfer")
+            continue
+
+        # Skip if box is too small (noise or very distant)
+        if box_area < MIN_BOX_AREA_PIXELS:
+            if DEBUG_DETECTION:
+                print(f"[FILTER] Skipping track_id={track_id}: Box too small "
+                      f"(area={box_area:.0f}px), likely noise")
+            continue
+
         cx = (x1 + x2) / 2.0
         cy = (y1 + y2) / 2.0
 
@@ -402,9 +409,6 @@ while True:
                 "timestamps": deque(maxlen=BUFFER_SIZE),
                 "maneuver_count": 0,
                 "last_maneuver_frame": -9999,
-                "drop_detected": False,
-                "min_y": float('inf'),
-                "max_y": float('-inf'),
                 "total_distance": 0.0,
                 "active_frames": 0,
                 "is_active": False,
@@ -421,10 +425,6 @@ while True:
         # Update trajectory & timestamps
         trajectory.append((cx, cy))
         timestamps.append(time.time())
-
-        # Update min/max Y for position-based classification
-        state["min_y"] = min(state["min_y"], cy)
-        state["max_y"] = max(state["max_y"], cy)
 
         # Track activity (movement distance and active frames)
         if len(trajectory) >= 2:
@@ -475,7 +475,7 @@ while True:
 
         # Maneuver detection for this surfer (only if active AND trajectory is consistent)
         if (state["is_active"] and
-            len(trajectory) >= max(DROP_SUSTAIN_FRAMES + 2, TURN_SUSTAIN_FRAMES + 2)):
+            len(trajectory) >= TURN_SUSTAIN_FRAMES + 2):
 
             # Check trajectory consistency to prevent false detections from ID swaps
             if not is_trajectory_consistent(trajectory):
@@ -483,23 +483,19 @@ while True:
                     print(f"[WARNING] Surfer {track_id}: Inconsistent trajectory detected (possible ID swap), "
                           f"skipping detection this frame")
             else:
-                detected, new_last_maneuver_frame, maneuver_type, metrics, new_drop_detected = detect_maneuver(
+                detected, new_last_maneuver_frame, maneuver_type, metrics = detect_maneuver(
                     list(trajectory),
                     list(angles),
                     list(timestamps),
                     state["last_maneuver_frame"],
                     frame_idx,
-                    state["drop_detected"],
-                    state["min_y"],
-                    state["max_y"],
                     track_id=track_id,
                 )
 
                 if detected:
                     state["last_maneuver_frame"] = new_last_maneuver_frame
                     state["maneuver_count"] += 1
-                    state["drop_detected"] = new_drop_detected
-                    detected_maneuver_this_frame = maneuver_type  # Track the maneuver type for overlay
+                    detected_maneuver_this_frame = True  # Track that a turn was detected
 
                     timestamp = time.time() - start_time
 
@@ -515,20 +511,11 @@ while True:
                     picture_path = os.path.join(state["pictures_dir"], f"{frame_idx}.png")
                     cv2.imwrite(picture_path, frame)
 
-                    # Print appropriate message based on maneuver type
-                    if maneuver_type == "drop":
-                        print(
-                            f"[{maneuver_type.upper()}] surfer_id={track_id}, frame={frame_idx}, "
-                            f"time={timestamp:.2f}s, total_maneuvers={state['maneuver_count']}, "
-                            f"distance={metrics['distance_pixels']:.1f}px, "
-                            f"max_vel={metrics['max_velocity_px_s']:.1f}px/s"
-                        )
-                    else:
-                        print(
-                            f"[{maneuver_type.upper()}] surfer_id={track_id}, frame={frame_idx}, "
-                            f"time={timestamp:.2f}s, total_maneuvers={state['maneuver_count']}, "
-                            f"angle={metrics['angle_degrees']:.1f}°, dir={metrics['direction']}"
-                        )
+                    print(
+                        f"[TURN] surfer_id={track_id}, frame={frame_idx}, "
+                        f"time={timestamp:.2f}s, total_turns={state['maneuver_count']}, "
+                        f"angle={metrics['angle_degrees']:.1f}°, dir={metrics['direction']}"
+                    )
 
         # ---------------------------------------------------
         # DRAW OVERLAY FOR THIS SURFER (track_id)
@@ -539,7 +526,7 @@ while True:
         cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 255, 0), 2)
 
         label_id = f"ID: {track_id}"
-        label_maneuvers = f"Maneuvers: {state['maneuver_count']}"
+        label_maneuvers = f"Turns: {state['maneuver_count']}"
 
         (tw1, th1), _ = cv2.getTextSize(label_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         (tw2, th2), _ = cv2.getTextSize(label_maneuvers, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -580,21 +567,12 @@ while True:
             2,
         )
 
-    # Global maneuver flash if any surfer performed a maneuver in this frame
+    # Global turn flash if any surfer performed a turn in this frame
     if detected_maneuver_this_frame:
-        # Map maneuver types to display text
-        maneuver_display = {
-            "drop": "DROP!",
-            "bottom_turn": "BOTTOM TURN!",
-            "snap": "SNAP!",
-            "cutback": "CUTBACK!",
-        }
-        display_text = maneuver_display.get(detected_maneuver_this_frame, "MANEUVER!")
-
         cv2.putText(
             frame,
-            display_text,
-            (frame_w // 2 - 120, 80),
+            "TURN!",
+            (frame_w // 2 - 80, 80),
             cv2.FONT_HERSHEY_SIMPLEX,
             2,
             (0, 0, 255),
@@ -620,11 +598,11 @@ inactive_surfers = 0
 
 for track_id, state in track_states.items():
     if state["maneuver_count"] == 0:
-        # Remove surfer directory if no maneuvers detected
+        # Remove surfer directory if no turns detected
         surfer_dir = state["surfer_dir"]
         if os.path.exists(surfer_dir):
             shutil.rmtree(surfer_dir)
-            reason = "inactive" if not state["is_active"] else "no maneuvers"
+            reason = "inactive" if not state["is_active"] else "no turns"
             print(f"[INFO] Removed surfer {track_id} ({reason}: "
                   f"distance={state['total_distance']:.1f}px, "
                   f"active_frames={state['active_frames']})")
@@ -632,21 +610,21 @@ for track_id, state in track_states.items():
             if not state["is_active"]:
                 inactive_surfers += 1
     else:
-        # Save JSON only for surfers with maneuvers
+        # Save JSON only for surfers with turns
         json_path = os.path.join(state["surfer_dir"], "turns.json")
         data = {
             "id": track_id,
-            "total_maneuvers": state["maneuver_count"],
+            "total_turns": state["maneuver_count"],
             "events": state["events"],
         }
         with open(json_path, "w") as f:
             json.dump(data, f, indent=4)
 
         print(f"[INFO] JSON saved for surfer {track_id} → {json_path} "
-              f"({state['maneuver_count']} maneuvers)")
+              f"({state['maneuver_count']} turns)")
         surfers_with_maneuvers += 1
 
 print(f"[INFO] Final video → {OUTPUT_VIDEO_PATH}")
 print(f"[INFO] Total surfers tracked: {len(track_states)}")
-print(f"[INFO] Surfers with maneuvers: {surfers_with_maneuvers}")
+print(f"[INFO] Surfers with turns: {surfers_with_maneuvers}")
 print(f"[INFO] Surfers removed: {surfers_removed} (inactive: {inactive_surfers})")
