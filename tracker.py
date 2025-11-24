@@ -10,6 +10,7 @@ import numpy as np
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_yaml
 import json
+import mediapipe as mp
 
 
 # -----------------------------------------------------------
@@ -138,6 +139,18 @@ BOT_SORT_YAML_PATH = "/app/botsort.yaml"
 tracker_cfg = check_yaml(BOT_SORT_YAML_PATH)
 print(f"[INFO] Using BoTSORT config: {BOT_SORT_YAML_PATH}")
 
+# Initialize MediaPipe Pose
+print("[INFO] Initializing MediaPipe Pose...")
+mp_pose = mp.solutions.pose
+pose_detector = mp_pose.Pose(
+    static_image_mode=False,
+    model_complexity=1,  # 0=Lite, 1=Full, 2=Heavy
+    enable_segmentation=False,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+print("[INFO] MediaPipe Pose initialized.")
+
 
 # -----------------------------------------------------------
 # OPEN VIDEO
@@ -193,6 +206,7 @@ print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 #   "trajectory": deque[(cx, cy)],
 #   "angles": deque[float],
 #   "timestamps": deque[float],
+#   "pose_features_history": deque[dict],  # history of pose features
 #   "maneuver_count": int,
 #   "last_maneuver_frame": int,
 #   "total_distance": float,
@@ -206,6 +220,146 @@ print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 track_states = {}
 frame_idx = 0
 start_time = time.time()
+
+
+# -----------------------------------------------------------
+# POSE FEATURE EXTRACTION
+# -----------------------------------------------------------
+
+def extract_pose_features(pose_landmarks, frame_w, frame_h):
+    """
+    Extract surf-relevant features from MediaPipe pose landmarks.
+
+    Returns dict with:
+    - body_lean: angle of body lean (degrees, 0=vertical)
+    - knee_bend: average knee bend angle (degrees)
+    - arm_extension: average arm extension ratio (0-1)
+    - center_mass_y: vertical position of center of mass (normalized 0-1)
+    - shoulder_rotation: shoulder line angle vs horizontal (degrees)
+    - hip_shoulder_alignment: alignment between hips and shoulders
+    """
+    if not pose_landmarks:
+        return None
+
+    landmarks = pose_landmarks.landmark
+
+    # Helper to get landmark coordinates (normalized)
+    def get_landmark(idx):
+        lm = landmarks[idx]
+        return np.array([lm.x, lm.y, lm.z]), lm.visibility
+
+    # Key landmarks (MediaPipe Pose indices)
+    LEFT_SHOULDER = 11
+    RIGHT_SHOULDER = 12
+    LEFT_HIP = 23
+    RIGHT_HIP = 24
+    LEFT_KNEE = 25
+    RIGHT_KNEE = 26
+    LEFT_ANKLE = 27
+    RIGHT_ANKLE = 28
+    LEFT_ELBOW = 13
+    RIGHT_ELBOW = 14
+    LEFT_WRIST = 15
+    RIGHT_WRIST = 16
+
+    features = {}
+
+    try:
+        # Get key points
+        l_shoulder, l_shoulder_vis = get_landmark(LEFT_SHOULDER)
+        r_shoulder, r_shoulder_vis = get_landmark(RIGHT_SHOULDER)
+        l_hip, l_hip_vis = get_landmark(LEFT_HIP)
+        r_hip, r_hip_vis = get_landmark(RIGHT_HIP)
+        l_knee, l_knee_vis = get_landmark(LEFT_KNEE)
+        r_knee, r_knee_vis = get_landmark(RIGHT_KNEE)
+        l_ankle, l_ankle_vis = get_landmark(LEFT_ANKLE)
+        r_ankle, r_ankle_vis = get_landmark(RIGHT_ANKLE)
+        l_elbow, l_elbow_vis = get_landmark(LEFT_ELBOW)
+        r_elbow, r_elbow_vis = get_landmark(RIGHT_ELBOW)
+        l_wrist, l_wrist_vis = get_landmark(LEFT_WRIST)
+        r_wrist, r_wrist_vis = get_landmark(RIGHT_WRIST)
+
+        # Calculate center points
+        shoulder_center = (l_shoulder + r_shoulder) / 2
+        hip_center = (l_hip + r_hip) / 2
+
+        # 1. Body lean angle (torso angle from vertical)
+        torso_vec = shoulder_center - hip_center
+        vertical_vec = np.array([0, -1, 0])  # Y points down in image coords
+
+        # Angle in 2D (ignore z)
+        torso_2d = torso_vec[:2]
+        vertical_2d = vertical_vec[:2]
+
+        if np.linalg.norm(torso_2d) > 0:
+            cos_angle = np.dot(torso_2d, vertical_2d) / (np.linalg.norm(torso_2d) * np.linalg.norm(vertical_2d))
+            cos_angle = np.clip(cos_angle, -1, 1)
+            body_lean = math.degrees(math.acos(cos_angle))
+        else:
+            body_lean = 0
+
+        features["body_lean"] = body_lean
+
+        # 2. Knee bend angles
+        def calculate_angle(a, b, c):
+            """Calculate angle at point b formed by points a-b-c"""
+            ba = a - b
+            bc = c - b
+
+            if np.linalg.norm(ba) == 0 or np.linalg.norm(bc) == 0:
+                return 180.0
+
+            cosine = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+            cosine = np.clip(cosine, -1, 1)
+            angle = math.degrees(math.acos(cosine))
+            return angle
+
+        left_knee_angle = calculate_angle(l_hip, l_knee, l_ankle)
+        right_knee_angle = calculate_angle(r_hip, r_knee, r_ankle)
+
+        # Average knee bend (lower angle = more bent)
+        knee_angles = []
+        if l_knee_vis > 0.5 and l_hip_vis > 0.5 and l_ankle_vis > 0.5:
+            knee_angles.append(left_knee_angle)
+        if r_knee_vis > 0.5 and r_hip_vis > 0.5 and r_ankle_vis > 0.5:
+            knee_angles.append(right_knee_angle)
+
+        features["knee_bend"] = np.mean(knee_angles) if knee_angles else 180.0
+
+        # 3. Arm extension (shoulder-elbow-wrist angle)
+        left_arm_angle = calculate_angle(l_shoulder, l_elbow, l_wrist)
+        right_arm_angle = calculate_angle(r_shoulder, r_elbow, r_wrist)
+
+        arm_angles = []
+        if l_shoulder_vis > 0.5 and l_elbow_vis > 0.5 and l_wrist_vis > 0.5:
+            arm_angles.append(left_arm_angle)
+        if r_shoulder_vis > 0.5 and r_elbow_vis > 0.5 and r_wrist_vis > 0.5:
+            arm_angles.append(right_arm_angle)
+
+        # Extension ratio: 180° = fully extended (1.0), 0° = fully bent (0.0)
+        avg_arm_angle = np.mean(arm_angles) if arm_angles else 180.0
+        features["arm_extension"] = avg_arm_angle / 180.0
+
+        # 4. Center of mass (approximate as midpoint of shoulders and hips)
+        center_mass = (shoulder_center + hip_center) / 2
+        features["center_mass_y"] = center_mass[1]  # Normalized Y position
+
+        # 5. Shoulder rotation (shoulder line angle from horizontal)
+        shoulder_vec = r_shoulder - l_shoulder
+        shoulder_angle = math.degrees(math.atan2(shoulder_vec[1], shoulder_vec[0]))
+        features["shoulder_rotation"] = shoulder_angle
+
+        # 6. Hip-shoulder alignment (check if torso is twisted)
+        hip_vec = r_hip - l_hip
+        hip_angle = math.degrees(math.atan2(hip_vec[1], hip_vec[0]))
+        features["hip_shoulder_alignment"] = abs(shoulder_angle - hip_angle)
+
+        return features
+
+    except Exception as e:
+        if DEBUG_DETECTION:
+            print(f"[WARN] Pose feature extraction failed: {e}")
+        return None
 
 
 # -----------------------------------------------------------
@@ -312,6 +466,175 @@ def detect_maneuver(trajectory, angles, times, last_maneuver_frame, current_fram
 
 
 # -----------------------------------------------------------
+# ENHANCED TRAJECTORY FEATURES
+# -----------------------------------------------------------
+
+def calculate_trajectory_features(trajectory, angles, times):
+    """
+    Calculate enhanced trajectory features for maneuver classification.
+
+    Returns dict with:
+    - turn_radius: approximate radius of the turn (pixels)
+    - speed: average speed over trajectory (pixels/second)
+    - vertical_displacement: change in vertical position
+    - path_smoothness: measure of trajectory smoothness
+    """
+    if len(trajectory) < 5:
+        return None
+
+    try:
+        features = {}
+
+        # Calculate turn radius (using curvature approximation)
+        positions = np.array(trajectory[-12:])  # Last 12 positions
+        if len(positions) >= 3:
+            # Simple radius estimation: fit circle to 3 points
+            p1, p2, p3 = positions[0], positions[len(positions)//2], positions[-1]
+
+            # Calculate radius using three points
+            a = np.linalg.norm(p2 - p1)
+            b = np.linalg.norm(p3 - p2)
+            c = np.linalg.norm(p3 - p1)
+
+            # Use triangle area formula to get radius
+            s = (a + b + c) / 2  # semi-perimeter
+            if s > 0 and (s-a) > 0 and (s-b) > 0 and (s-c) > 0:
+                area = math.sqrt(s * (s-a) * (s-b) * (s-c))
+                if area > 0:
+                    radius = (a * b * c) / (4 * area)
+                    features["turn_radius"] = radius
+                else:
+                    features["turn_radius"] = float('inf')
+            else:
+                features["turn_radius"] = float('inf')
+        else:
+            features["turn_radius"] = float('inf')
+
+        # Calculate speed
+        if len(times) >= 2 and len(trajectory) >= 2:
+            total_distance = 0
+            for i in range(1, len(trajectory)):
+                dx = trajectory[i][0] - trajectory[i-1][0]
+                dy = trajectory[i][1] - trajectory[i-1][1]
+                total_distance += math.sqrt(dx**2 + dy**2)
+
+            time_span = times[-1] - times[0]
+            if time_span > 0:
+                features["speed"] = total_distance / time_span
+            else:
+                features["speed"] = 0
+        else:
+            features["speed"] = 0
+
+        # Vertical displacement (y increases downward in image coords)
+        features["vertical_displacement"] = trajectory[-1][1] - trajectory[0][1]
+
+        # Path smoothness (variance in direction changes)
+        if len(angles) >= 3:
+            angle_changes = np.abs(np.diff(angles))
+            features["path_smoothness"] = np.std(angle_changes)
+        else:
+            features["path_smoothness"] = 0
+
+        return features
+
+    except Exception as e:
+        if DEBUG_DETECTION:
+            print(f"[WARN] Trajectory feature calculation failed: {e}")
+        return None
+
+
+# -----------------------------------------------------------
+# MANEUVER CLASSIFIER
+# -----------------------------------------------------------
+
+def classify_maneuver(pose_features, trajectory_features, turn_metrics):
+    """
+    Classify specific surf maneuver type based on combined pose and trajectory features.
+
+    Uses rule-based classification for:
+    - bottom_turn: Deep lean, high speed, large radius turn at bottom of wave
+    - snap: Sharp turn with compressed stance, small radius, high angular speed
+    - cutback: Extended carve with moderate lean, larger radius
+    - floater: High vertical position, arms extended for balance
+    - carve: General turn with moderate characteristics
+
+    Returns: maneuver_type (str) or "turn" if cannot classify specifically
+    """
+    if not pose_features or not trajectory_features or not turn_metrics:
+        return "turn"  # Fallback to generic turn
+
+    try:
+        body_lean = pose_features.get("body_lean", 0)
+        knee_bend = pose_features.get("knee_bend", 180)
+        arm_extension = pose_features.get("arm_extension", 0.5)
+        center_mass_y = pose_features.get("center_mass_y", 0.5)
+
+        turn_radius = trajectory_features.get("turn_radius", float('inf'))
+        speed = trajectory_features.get("speed", 0)
+        vertical_disp = trajectory_features.get("vertical_displacement", 0)
+
+        angle_deg = turn_metrics.get("angle_degrees", 0)
+        angular_speed = turn_metrics.get("angular_speed_deg_s", 0)
+        direction = turn_metrics.get("direction", "unknown")
+
+        # SNAP: Sharp, aggressive turn with compressed stance
+        # - High angular speed (>40°/s)
+        # - Small turn radius (<100px)
+        # - Deep knee bend (<140°)
+        # - Moderate to high lean (>20°)
+        if (angular_speed > 40 and
+            turn_radius < 100 and
+            knee_bend < 140 and
+            body_lean > 20):
+            return "snap"
+
+        # BOTTOM TURN: Deep carving turn at bottom of wave
+        # - Large turn radius (>150px)
+        # - High body lean (>25°)
+        # - Downward vertical displacement (moving down wave face)
+        # - Moderate to high speed
+        if (turn_radius > 150 and
+            body_lean > 25 and
+            vertical_disp > 10 and  # Moving down in frame
+            speed > 20):
+            return "bottom_turn"
+
+        # CUTBACK: Extended carving turn back toward wave
+        # - Large turn radius (>120px)
+        # - Moderate lean (15-30°)
+        # - Extended arms for balance
+        # - Large angle change (>60°)
+        if (turn_radius > 120 and
+            15 < body_lean < 30 and
+            arm_extension > 0.6 and
+            angle_deg > 60):
+            return "cutback"
+
+        # FLOATER: Riding on top of foam/lip
+        # - High vertical position or upward movement
+        # - Extended arms for balance
+        # - Less aggressive turn
+        if (center_mass_y < 0.4 or vertical_disp < -5) and arm_extension > 0.7:
+            return "floater"
+
+        # CARVE: General carving turn
+        # - Moderate characteristics
+        # - Decent lean angle
+        # - Smooth path
+        if body_lean > 15 and angle_deg > 35:
+            return "carve"
+
+        # Default: generic turn
+        return "turn"
+
+    except Exception as e:
+        if DEBUG_DETECTION:
+            print(f"[WARN] Maneuver classification failed: {e}")
+        return "turn"
+
+
+# -----------------------------------------------------------
 # MAIN LOOP
 # -----------------------------------------------------------
 
@@ -407,6 +730,7 @@ while True:
                 "trajectory": deque(maxlen=BUFFER_SIZE),
                 "angles": deque(maxlen=BUFFER_SIZE),
                 "timestamps": deque(maxlen=BUFFER_SIZE),
+                "pose_features_history": deque(maxlen=BUFFER_SIZE),
                 "maneuver_count": 0,
                 "last_maneuver_frame": -9999,
                 "total_distance": 0.0,
@@ -421,6 +745,33 @@ while True:
         trajectory = state["trajectory"]
         angles = state["angles"]
         timestamps = state["timestamps"]
+        pose_features_history = state["pose_features_history"]
+
+        # Extract pose from bounding box region
+        x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
+
+        # Ensure bounding box is within frame
+        x1i = max(0, x1i)
+        y1i = max(0, y1i)
+        x2i = min(frame_w, x2i)
+        y2i = min(frame_h, y2i)
+
+        # Extract ROI for pose detection
+        roi = frame[y1i:y2i, x1i:x2i]
+
+        # Run MediaPipe pose detection on ROI
+        pose_features = None
+        if roi.size > 0:
+            # Convert BGR to RGB for MediaPipe
+            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+            pose_results = pose_detector.process(roi_rgb)
+
+            if pose_results.pose_landmarks:
+                # Extract pose features
+                pose_features = extract_pose_features(pose_results.pose_landmarks, x2i - x1i, y2i - y1i)
+
+        # Store pose features (even if None)
+        pose_features_history.append(pose_features)
 
         # Update trajectory & timestamps
         trajectory.append((cx, cy))
@@ -499,11 +850,35 @@ while True:
 
                     timestamp = time.time() - start_time
 
+                    # Calculate enhanced trajectory features
+                    traj_features = calculate_trajectory_features(
+                        list(trajectory),
+                        list(angles),
+                        list(timestamps)
+                    )
+
+                    # Get most recent valid pose features
+                    recent_pose_features = None
+                    for pf in reversed(pose_features_history):
+                        if pf is not None:
+                            recent_pose_features = pf
+                            break
+
+                    # Classify specific maneuver type
+                    specific_maneuver_type = classify_maneuver(
+                        recent_pose_features,
+                        traj_features,
+                        metrics
+                    )
+
+                    # Combine all features for event storage
                     event = {
                         "frame": frame_idx,
                         "timestamp": timestamp,
-                        "maneuver_type": maneuver_type,
-                        "metrics": metrics,
+                        "maneuver_type": specific_maneuver_type,
+                        "turn_metrics": metrics,
+                        "pose_features": recent_pose_features,
+                        "trajectory_features": traj_features,
                     }
                     state["events"].append(event)
 
@@ -511,22 +886,30 @@ while True:
                     picture_path = os.path.join(state["pictures_dir"], f"{frame_idx}.png")
                     cv2.imwrite(picture_path, frame)
 
+                    # Enhanced logging with maneuver type
+                    maneuver_display = specific_maneuver_type.upper().replace("_", " ")
                     print(
-                        f"[TURN] surfer_id={track_id}, frame={frame_idx}, "
-                        f"time={timestamp:.2f}s, total_turns={state['maneuver_count']}, "
+                        f"[{maneuver_display}] surfer_id={track_id}, frame={frame_idx}, "
+                        f"time={timestamp:.2f}s, total_maneuvers={state['maneuver_count']}, "
                         f"angle={metrics['angle_degrees']:.1f}°, dir={metrics['direction']}"
                     )
+
+                    # Print detailed features if DEBUG enabled
+                    if DEBUG_DETECTION and traj_features and recent_pose_features:
+                        print(f"  └─ Trajectory: radius={traj_features.get('turn_radius', 0):.1f}px, "
+                              f"speed={traj_features.get('speed', 0):.1f}px/s")
+                        print(f"  └─ Pose: lean={recent_pose_features.get('body_lean', 0):.1f}°, "
+                              f"knee_bend={recent_pose_features.get('knee_bend', 0):.1f}°")
 
         # ---------------------------------------------------
         # DRAW OVERLAY FOR THIS SURFER (track_id)
         # ---------------------------------------------------
-        x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
 
-        # bounding box
+        # bounding box (x1i, y1i, x2i, y2i already set above)
         cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 255, 0), 2)
 
         label_id = f"ID: {track_id}"
-        label_maneuvers = f"Turns: {state['maneuver_count']}"
+        label_maneuvers = f"Maneuvers: {state['maneuver_count']}"
 
         (tw1, th1), _ = cv2.getTextSize(label_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         (tw2, th2), _ = cv2.getTextSize(label_maneuvers, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -567,12 +950,14 @@ while True:
             2,
         )
 
-    # Global turn flash if any surfer performed a turn in this frame
+    # Global maneuver flash if any surfer performed a maneuver in this frame
+    # Note: detected_maneuver_this_frame is just a boolean, we don't track which specific type here
+    # (that info is already in the per-surfer state)
     if detected_maneuver_this_frame:
         cv2.putText(
             frame,
-            "TURN!",
-            (frame_w // 2 - 80, 80),
+            "MANEUVER!",
+            (frame_w // 2 - 120, 80),
             cv2.FONT_HERSHEY_SIMPLEX,
             2,
             (0, 0, 255),
@@ -589,6 +974,7 @@ while True:
 
 cap.release()
 out.release()
+pose_detector.close()
 
 print("[INFO] Processing per-surfer data...")
 
@@ -598,11 +984,11 @@ inactive_surfers = 0
 
 for track_id, state in track_states.items():
     if state["maneuver_count"] == 0:
-        # Remove surfer directory if no turns detected
+        # Remove surfer directory if no maneuvers detected
         surfer_dir = state["surfer_dir"]
         if os.path.exists(surfer_dir):
             shutil.rmtree(surfer_dir)
-            reason = "inactive" if not state["is_active"] else "no turns"
+            reason = "inactive" if not state["is_active"] else "no maneuvers"
             print(f"[INFO] Removed surfer {track_id} ({reason}: "
                   f"distance={state['total_distance']:.1f}px, "
                   f"active_frames={state['active_frames']})")
@@ -610,21 +996,21 @@ for track_id, state in track_states.items():
             if not state["is_active"]:
                 inactive_surfers += 1
     else:
-        # Save JSON only for surfers with turns
-        json_path = os.path.join(state["surfer_dir"], "turns.json")
+        # Save JSON only for surfers with maneuvers
+        json_path = os.path.join(state["surfer_dir"], "maneuvers.json")
         data = {
             "id": track_id,
-            "total_turns": state["maneuver_count"],
+            "total_maneuvers": state["maneuver_count"],
             "events": state["events"],
         }
         with open(json_path, "w") as f:
             json.dump(data, f, indent=4)
 
         print(f"[INFO] JSON saved for surfer {track_id} → {json_path} "
-              f"({state['maneuver_count']} turns)")
+              f"({state['maneuver_count']} maneuvers)")
         surfers_with_maneuvers += 1
 
 print(f"[INFO] Final video → {OUTPUT_VIDEO_PATH}")
 print(f"[INFO] Total surfers tracked: {len(track_states)}")
-print(f"[INFO] Surfers with turns: {surfers_with_maneuvers}")
+print(f"[INFO] Surfers with maneuvers: {surfers_with_maneuvers}")
 print(f"[INFO] Surfers removed: {surfers_removed} (inactive: {inactive_surfers})")
