@@ -2,3 +2,10 @@ data/*
 .*.swp
 .DS_Store
 .playwright-mcp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
