@@ -7,7 +7,7 @@ from config import settings
 from database import engine, Base
 
 # Import routers
-from routers import auth, profile, sessions
+from routers import auth, profile, sessions, files
 
 app = FastAPI(
     title="Surf Tracker API",
@@ -82,6 +82,7 @@ async def health_check():
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(profile.router, prefix="/api/profile", tags=["Profile"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
+app.include_router(files.router, prefix="/api/files", tags=["Files"])
 
 
 if __name__ == "__main__":

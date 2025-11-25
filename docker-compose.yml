@@ -29,6 +29,28 @@ services:
       timeout: 5s
       retries: 5
 
+  # Mailhog for email testing
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: surf_tracker_mailhog
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    logging:
+      driver: none  # Disable logging to reduce noise
+
+  # Adminer for database management
+  adminer:
+    image: adminer:latest
+    container_name: surf_tracker_adminer
+    ports:
+      - "8080:8080"  # Web UI
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DESIGN: pepa-linha-dark
+    depends_on:
+      - db
+
   # FastAPI backend
   api:
     build: ./api
@@ -40,10 +62,10 @@ services:
       JWT_ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: 15
       REFRESH_TOKEN_EXPIRE_DAYS: 7
-      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
       - ./data:/data
@@ -55,6 +77,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   # Celery worker for background tasks
@@ -64,6 +88,11 @@ services:
     environment:
       DATABASE_URL: postgresql://surf_user:${DB_PASSWORD:-changeme}@db:5432/surf_tracker
       REDIS_URL: redis://redis:6379/0
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
       - ./data:/data
       - ./api:/app
@@ -72,6 +101,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     command: celery -A tasks.celery_app worker --loglevel=info
 
   # Standalone tracker service (for manual runs)

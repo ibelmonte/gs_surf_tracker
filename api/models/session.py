@@ -16,6 +16,10 @@ class SurfingSession(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
 
+    # Session metadata
+    location = Column(String(255), nullable=True)
+    session_date = Column(String(50), nullable=True)  # Stored as string from user input
+
     # Video file information
     video_filename = Column(String(255), nullable=False)
     video_path = Column(String(500), nullable=False)

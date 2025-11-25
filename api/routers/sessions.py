@@ -1,11 +1,11 @@
 """
 Session management endpoints - video upload and session tracking.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from pathlib import Path
 import uuid
-from typing import List
+from typing import List, Optional
 
 from database import get_db
 from models import User, SurfingSession
@@ -25,6 +25,8 @@ router = APIRouter()
 @router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_video(
     file: UploadFile = File(...),
+    location: Optional[str] = Form(None),
+    date: Optional[str] = Form(None),
     current_user: User = Depends(get_current_confirmed_user),
     db: Session = Depends(get_db)
 ):
@@ -78,6 +80,8 @@ async def upload_video(
         user_id=current_user.id,
         video_filename=file.filename,
         video_path=str(file_path),
+        location=location,
+        session_date=date,
         status=SessionStatus.PENDING
     )
 

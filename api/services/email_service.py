@@ -16,7 +16,8 @@ class EmailService:
         self.smtp_port = settings.SMTP_PORT
         self.smtp_user = settings.SMTP_USER
         self.smtp_password = settings.SMTP_PASSWORD
-        self.from_email = settings.SMTP_USER
+        # Use a default from_email if SMTP_USER is not set (e.g., for Mailhog)
+        self.from_email = settings.SMTP_USER or "noreply@surftracker.com"
 
     def send_email(
         self,
@@ -55,8 +56,11 @@ class EmailService:
 
             # Send email
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.smtp_user, self.smtp_password)
+                # Only use TLS and authentication if credentials are provided
+                # Mailhog doesn't require authentication
+                if self.smtp_user and self.smtp_password:
+                    server.starttls()
+                    server.login(self.smtp_user, self.smtp_password)
                 server.send_message(message)
 
             print(f"[INFO] Email sent successfully to {to_email}")

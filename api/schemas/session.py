@@ -44,6 +44,8 @@ class SessionResponse(BaseModel):
     id: UUID
     user_id: UUID
     video_filename: str
+    location: Optional[str]
+    session_date: Optional[str]
     status: SessionStatus
     error_message: Optional[str]
     output_path: Optional[str]
