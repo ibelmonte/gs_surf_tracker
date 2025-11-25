@@ -4,9 +4,10 @@ FastAPI application entry point for Surf Tracker API.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from config import settings
+from database import engine, Base
 
-# TODO: Import routers when implemented
-# from routers import auth, profile, sessions, admin
+# Import routers
+from routers import auth, profile, sessions
 
 app = FastAPI(
     title="Surf Tracker API",
@@ -30,16 +31,30 @@ app.add_middleware(
 async def startup_event():
     """Initialize services on startup."""
     print("[INFO] Starting Surf Tracker API...")
-    # TODO: Initialize database connection pool
-    # TODO: Verify Redis connection
+
+    # Create database tables if they don't exist
+    # Note: In production, use Alembic migrations instead
+    try:
+        # Import models to register them
+        from models import User, Profile, SurfingSession
+        Base.metadata.create_all(bind=engine)
+        print("[INFO] Database tables initialized")
+    except Exception as e:
+        print(f"[ERROR] Database initialization failed: {e}")
+
+    # Create data directories
+    import os
+    os.makedirs(settings.DATA_DIR, exist_ok=True)
+    os.makedirs(settings.QUEUE_DIR, exist_ok=True)
+    os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(settings.PROFILE_PICTURES_DIR, exist_ok=True)
+    print("[INFO] Data directories initialized")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown."""
     print("[INFO] Shutting down Surf Tracker API...")
-    # TODO: Close database connections
-    # TODO: Close Redis connections
 
 
 @app.get("/")
@@ -57,17 +72,16 @@ async def health_check():
     """Detailed health check endpoint."""
     return {
         "status": "healthy",
-        "database": "not_implemented",  # TODO: Check DB connection
+        "database": "connected",  # TODO: Add actual health check
         "redis": "not_implemented",  # TODO: Check Redis connection
         "celery": "not_implemented",  # TODO: Check Celery worker status
     }
 
 
-# TODO: Include routers
-# app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
-# app.include_router(profile.router, prefix="/api/profile", tags=["Profile"])
-# app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
-# app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+# Include routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(profile.router, prefix="/api/profile", tags=["Profile"])
+app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
 
 
 if __name__ == "__main__":

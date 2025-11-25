@@ -1,0 +1,30 @@
+{
+    "id": 2,
+    "total_maneuvers": 1,
+    "events": [
+        {
+            "frame": 217,
+            "timestamp": 42.803162574768066,
+            "maneuver_type": "floater",
+            "turn_metrics": {
+                "angle_degrees": 59.89496856520514,
+                "direction": "left",
+                "angular_speed_deg_s": 96.24549378861346
+            },
+            "pose_features": {
+                "body_lean": 14.1222130055681,
+                "knee_bend": 180.0,
+                "arm_extension": 1.0,
+                "center_mass_y": 0.3577309809625149,
+                "shoulder_rotation": -166.70377381863116,
+                "hip_shoulder_alignment": 4.351538816313052
+            },
+            "trajectory_features": {
+                "turn_radius": 17.052370534933747,
+                "speed": 5.2175135430533945,
+                "vertical_displacement": -4.4854736328125,
+                "path_smoothness": 0.34099034474042034
+            }
+        }
+    ]
+}

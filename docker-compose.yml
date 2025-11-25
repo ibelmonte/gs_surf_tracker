@@ -67,7 +67,6 @@ services:
     volumes:
       - ./data:/data
       - ./api:/app
-      - /var/run/docker.sock:/var/run/docker.sock  # To run tracker containers
     depends_on:
       db:
         condition: service_healthy
@@ -75,17 +74,22 @@ services:
         condition: service_healthy
     command: celery -A tasks.celery_app worker --loglevel=info
 
-  # Tracker service (pre-built image, not continuously running)
+  # Standalone tracker service (for manual runs)
+  # Usage: docker compose run --rm tracker
   tracker:
-    build: ./tracker
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     container_name: surf_tracker_processor
     environment:
-      - VIDEO_SOURCE=/app/data/input.mp4
+      - VIDEO_SOURCE=${VIDEO_SOURCE:-/data/input.mp4}
+      - OUTPUT_DIR=${OUTPUT_DIR:-/data/output}
       - ROTATION=${ROTATION:-}
     volumes:
-      - ./data:/app/data
+      - ./data:/data
+    command: python /app/tracker/tracker.py
     profiles:
-      - manual  # This service won't start automatically
+      - manual  # This service won't start automatically with docker compose up
 
   # Next.js website
   website:

@@ -1,0 +1,27 @@
+tracker_type: botsort
+
+# Required fields
+model: auto
+fuse_score: True
+
+with_reid: True
+reid_model: osnet_x0_25
+reid_weights: yolo11n_reid.pt
+
+# Thresholds (robust against occlusion)
+track_high_thresh: 0.5
+track_low_thresh: 0.10
+new_track_thresh: 0.40
+
+# Matching behavior
+match_thresh: 0.80
+proximity_thresh: 0.50
+appearance_thresh: 0.15    # was 0.25 → stronger ReID
+
+# Tracker behaviour
+track_buffer: 90            # was 30 → MUCH longer oclusion tolerance
+max_age: 60                 # was 30 → allow more "dead time"
+
+# Motion estimation
+gmc_method: sparseOptFlow
+motion: True

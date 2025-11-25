@@ -40,7 +40,7 @@ def get_db():
 def init_db():
     """Initialize database tables (called during startup or migrations)."""
     # Import all models here to ensure they're registered
-    # from models import user, profile, session
+    from models import User, Profile, SurfingSession
 
     # Create all tables
     Base.metadata.create_all(bind=engine)

@@ -1,0 +1,78 @@
+{
+    "id": 1,
+    "total_maneuvers": 3,
+    "events": [
+        {
+            "frame": 147,
+            "timestamp": 29.90605592727661,
+            "maneuver_type": "carve",
+            "turn_metrics": {
+                "angle_degrees": 95.02625387871865,
+                "direction": "right",
+                "angular_speed_deg_s": 107.13000680807859
+            },
+            "pose_features": {
+                "body_lean": 34.085987492288055,
+                "knee_bend": 180.0,
+                "arm_extension": 0.08194920949425286,
+                "center_mass_y": 0.9157807230949402,
+                "shoulder_rotation": -175.84505572499245,
+                "hip_shoulder_alignment": 5.508427494494214
+            },
+            "trajectory_features": {
+                "turn_radius": 20.443075397211157,
+                "speed": 8.002097143570554,
+                "vertical_displacement": 52.8155517578125,
+                "path_smoothness": 0.2966766868112923
+            }
+        },
+        {
+            "frame": 169,
+            "timestamp": 34.1968047618866,
+            "maneuver_type": "floater",
+            "turn_metrics": {
+                "angle_degrees": 47.34441940205692,
+                "direction": "right",
+                "angular_speed_deg_s": 40.32364052394525
+            },
+            "pose_features": {
+                "body_lean": 1.0697849006112352,
+                "knee_bend": 180.0,
+                "arm_extension": 1.0,
+                "center_mass_y": 0.34689535573124886,
+                "shoulder_rotation": -168.94513656758636,
+                "hip_shoulder_alignment": 0.8692269892132742
+            },
+            "trajectory_features": {
+                "turn_radius": 48.44555858108856,
+                "speed": 7.0525875537012235,
+                "vertical_displacement": 39.8681640625,
+                "path_smoothness": 0.25252926325683933
+            }
+        },
+        {
+            "frame": 224,
+            "timestamp": 44.189199686050415,
+            "maneuver_type": "carve",
+            "turn_metrics": {
+                "angle_degrees": 66.10707211356427,
+                "direction": "left",
+                "angular_speed_deg_s": 100.49865889598773
+            },
+            "pose_features": {
+                "body_lean": 16.826462021266284,
+                "knee_bend": 180.0,
+                "arm_extension": 0.6620146871989365,
+                "center_mass_y": 0.4821382984519005,
+                "shoulder_rotation": -169.7870345468307,
+                "hip_shoulder_alignment": 2.3921293378975292
+            },
+            "trajectory_features": {
+                "turn_radius": 25.721329861237454,
+                "speed": 9.490618606925077,
+                "vertical_displacement": 10.10662841796875,
+                "path_smoothness": 0.2906013147170061
+            }
+        }
+    ]
+}

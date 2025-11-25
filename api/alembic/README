@@ -1,0 +1,54 @@
+Alembic Database Migrations
+===========================
+
+This directory contains database migration scripts managed by Alembic.
+
+## Common Commands
+
+### Create a new migration (auto-generate from model changes)
+```bash
+alembic revision --autogenerate -m "description of changes"
+```
+
+### Create a blank migration
+```bash
+alembic revision -m "description of changes"
+```
+
+### Apply all pending migrations
+```bash
+alembic upgrade head
+```
+
+### Rollback one migration
+```bash
+alembic downgrade -1
+```
+
+### View current migration status
+```bash
+alembic current
+```
+
+### View migration history
+```bash
+alembic history
+```
+
+## Initial Setup
+
+To create the initial database schema:
+
+```bash
+# Generate initial migration from current models
+alembic revision --autogenerate -m "initial schema"
+
+# Apply the migration
+alembic upgrade head
+```
+
+## Notes
+
+- The database URL is automatically loaded from the DATABASE_URL environment variable
+- All models must be imported in alembic/env.py for autogenerate to work
+- Always review auto-generated migrations before applying them
