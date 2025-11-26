@@ -75,3 +75,16 @@ class UploadResponse(BaseModel):
     session_id: UUID
     message: str
     status: SessionStatus
+
+
+class MergeSurfersRequest(BaseModel):
+    """Schema for merging surfers request."""
+    surfer_ids: List[int] = Field(..., min_length=1, description="List of surfer IDs to merge")
+
+
+class MergeSurfersResponse(BaseModel):
+    """Schema for merging surfers response."""
+    message: str
+    merged_surfer_id: int
+    total_events_merged: int
+    surfers_removed: int

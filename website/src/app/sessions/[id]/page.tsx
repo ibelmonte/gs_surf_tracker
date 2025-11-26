@@ -2,60 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { sessionsApi, apiClient } from '@/lib/api-client';
+import { sessionsApi } from '@/lib/api-client';
+import { AuthenticatedImage } from '@/components/AuthenticatedImage';
+import { SurferIdentificationModal } from '@/components/SurferIdentificationModal';
 import Link from 'next/link';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-// Component to load authenticated images
-function AuthenticatedImage({ src, alt, className }: { src: string; alt: string; className: string }) {
-  const [imgSrc, setImgSrc] = useState<string>('');
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const loadImage = async () => {
-      try {
-        // Extract the path relative to OUTPUT_DIR
-        // Convert: /data/output/{user_id}/{session_id}/... to {user_id}/{session_id}/...
-        const pathMatch = src.match(/\/data\/output\/(.*)/);
-        const relativePath = pathMatch ? pathMatch[1] : src;
-
-        console.log('Original src:', src);
-        console.log('Extracted path:', relativePath);
-
-        const response = await apiClient.get(`/files/${relativePath}`, {
-          responseType: 'blob',
-        });
-        const url = URL.createObjectURL(response.data);
-        setImgSrc(url);
-        setLoading(false);
-      } catch (err) {
-        console.error('Failed to load image:', err);
-        setLoading(false);
-      }
-    };
-
-    loadImage();
-
-    return () => {
-      if (imgSrc) {
-        URL.revokeObjectURL(imgSrc);
-      }
-    };
-  }, [src]);
-
-  if (loading) {
-    return <div className={className + ' bg-gray-200 animate-pulse'}></div>;
-  }
-
-  if (!imgSrc) {
-    return <div className={className + ' bg-gray-100 flex items-center justify-center text-gray-400'}>
-      Failed to load
-    </div>;
-  }
-
-  return <img src={imgSrc} alt={alt} className={className} />;
-}
 
 interface Session {
   id: string;
@@ -98,6 +48,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedSurfer, setSelectedSurfer] = useState<number>(0);
+  const [showMergeModal, setShowMergeModal] = useState(false);
 
   useEffect(() => {
     loadSession();
@@ -111,6 +62,11 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     } catch (err) {
       router.push('/dashboard');
     }
+  };
+
+  const handleMergeSuccess = () => {
+    setShowMergeModal(false);
+    loadSession(); // Reload session data to show merged results
   };
 
   if (loading) {
@@ -153,6 +109,15 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 {session.session_date || new Date(session.created_at).toLocaleDateString()}
               </p>
             </div>
+            {/* Identify Yourself Button - only show when multiple surfers and completed */}
+            {session.status === 'completed' && session.results_json && session.results_json.surfers.length > 1 && (
+              <button
+                onClick={() => setShowMergeModal(true)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+              >
+                Identify Yourself
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -273,6 +238,16 @@ export default function SessionPage({ params }: { params: { id: string } }) {
           </div>
         )}
       </main>
+
+      {/* Surfer Identification Modal */}
+      {showMergeModal && session.results_json && (
+        <SurferIdentificationModal
+          sessionId={params.id}
+          surfers={session.results_json.surfers}
+          onClose={() => setShowMergeModal(false)}
+          onSuccess={handleMergeSuccess}
+        />
+      )}
     </div>
   );
 }

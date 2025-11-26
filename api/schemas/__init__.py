@@ -26,6 +26,8 @@ from .session import (
     SessionWithResults,
     SessionListResponse,
     UploadResponse,
+    MergeSurfersRequest,
+    MergeSurfersResponse,
 )
 
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "SessionWithResults",
     "SessionListResponse",
     "UploadResponse",
+    "MergeSurfersRequest",
+    "MergeSurfersResponse",
 ]

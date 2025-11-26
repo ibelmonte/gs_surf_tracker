@@ -104,6 +104,13 @@ export const sessionsApi = {
     const response = await apiClient.delete(`/sessions/${sessionId}`);
     return response.data;
   },
+
+  mergeSurfers: async (sessionId: string, surferIds: number[]) => {
+    const response = await apiClient.post(`/sessions/${sessionId}/merge-surfers`, {
+      surfer_ids: surferIds,
+    });
+    return response.data;
+  },
 };
 
 // Profile API

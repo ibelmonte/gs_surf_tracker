@@ -15,6 +15,8 @@ from schemas import (
     SessionListResponse,
     UploadResponse,
     SessionStatus,
+    MergeSurfersRequest,
+    MergeSurfersResponse,
 )
 from utils.dependencies import get_current_confirmed_user
 from config import settings
@@ -217,3 +219,109 @@ async def delete_session(
     print(f"[INFO] Session deleted: session_id={session_id}")
 
     return None
+
+
+@router.post("/{session_id}/merge-surfers", response_model=MergeSurfersResponse)
+async def merge_surfers(
+    session_id: uuid.UUID,
+    request: MergeSurfersRequest,
+    current_user: User = Depends(get_current_confirmed_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Merge multiple tracked surfers into a single identity.
+
+    - Requires authentication and confirmed email
+    - Session must be completed
+    - Merges events chronologically and combines pictures
+    - Deletes unselected surfer files permanently
+    - This action cannot be undone
+    """
+    from services.surfer_merge_service import SurferMergeService
+
+    # Get session and verify ownership
+    session = db.query(SurfingSession).filter(
+        SurfingSession.id == session_id,
+        SurfingSession.user_id == current_user.id
+    ).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    # Validate session status
+    if session.status != SessionStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot merge surfers - session status is '{session.status}'. Must be 'completed'."
+        )
+
+    # Validate results exist
+    if not session.results_json:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no results to merge"
+        )
+
+    # Validate multiple surfers exist
+    surfers = session.results_json.get('surfers', [])
+    if len(surfers) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has only one surfer - nothing to merge"
+        )
+
+    # Validate surfer IDs
+    is_valid, error_msg = SurferMergeService.validate_surfer_ids(
+        session.results_json,
+        request.surfer_ids
+    )
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_msg
+        )
+
+    try:
+        # Get all surfer IDs before merge
+        all_surfer_ids = [s['id'] for s in surfers]
+
+        # Perform merge on results_json
+        merged_results = SurferMergeService.merge_surfers(
+            session.results_json,
+            request.surfer_ids
+        )
+
+        # Delete unselected surfer files
+        deleted_ids = []
+        if session.output_path:
+            deleted_ids = SurferMergeService.delete_unselected_surfer_files(
+                session.output_path,
+                request.surfer_ids,
+                all_surfer_ids
+            )
+
+        # Update session with merged results
+        session.results_json = merged_results
+        db.commit()
+
+        # Get statistics
+        stats = SurferMergeService.get_merge_statistics(
+            {'surfers': surfers},
+            merged_results,
+            deleted_ids
+        )
+
+        print(f"[INFO] Surfers merged: session_id={session_id}, surfer_ids={request.surfer_ids}")
+
+        return MergeSurfersResponse(**stats)
+
+    except Exception as e:
+        db.rollback()
+        print(f"[ERROR] Failed to merge surfers: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to merge surfers: {str(e)}"
+        )

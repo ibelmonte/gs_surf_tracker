@@ -209,6 +209,7 @@ CREATE INDEX idx_sessions_status ON surfing_sessions(status);
 | GET | `/{session_id}` | Get session details + results |
 | POST | `/upload` | Upload video, create session, trigger processing |
 | DELETE | `/{session_id}` | Delete session and associated files |
+| POST | `/{session_id}/merge-surfers` | Merge multiple tracked surfers into single identity |
 
 ### 5.4 Admin (`/api/admin/`) - Optional
 
@@ -587,7 +588,325 @@ The session results page displays:
 
 ---
 
-## 13. Future Enhancements
+## 13. Surfer Identification & Merging Feature
+
+### 13.1 Problem Statement
+
+The tracker's BoTSORT algorithm can lose track of surfers during occlusions (e.g., behind waves, brief frame drops) and reassign them new track IDs when they reappear. This results in a single surfer being split across multiple tracked identities in the session results.
+
+**Example**: A user uploads a video where they are the only surfer, but the tracker detects them as "Surfer 1" (first 3 maneuvers), "Surfer 2" (middle 4 maneuvers), and "Surfer 3" (final 2 maneuvers).
+
+### 13.2 Solution Overview
+
+A **post-processing feature** that allows users to:
+1. View all detected surfers in a session
+2. Select multiple surfer IDs that represent the same person (themselves)
+3. Merge those surfers into a single identity with chronologically sorted events
+4. Permanently remove unselected surfers from the session
+
+### 13.3 User Interface
+
+#### Location
+- Session detail page (`/sessions/{id}`)
+- Appears in the header area alongside session metadata
+
+#### Trigger Conditions
+- Button shown only when: `session.status === 'completed' && surfers.length > 1`
+- Button text: "Identify Yourself"
+
+#### Interaction Flow
+1. User clicks "Identify Yourself" button
+2. Full-screen modal overlay opens
+3. Modal displays grid of surfer cards (1-3 columns, responsive)
+4. Each surfer card shows:
+   - Surfer ID badge (e.g., "Surfer 2")
+   - 3-4 thumbnail images from their maneuvers
+   - Total maneuver count
+   - Checkbox for selection
+5. User checks all surfers that represent them
+6. User clicks "Merge X Surfers" button
+7. Confirmation dialog appears: "This action cannot be undone. Unselected surfers will be permanently removed."
+8. User confirms
+9. Loading state during processing
+10. Page auto-refreshes showing merged results
+
+#### Visual Design
+- Modal uses authenticated image loading (AuthenticatedImage component)
+- Clear warnings about permanent action
+- Disabled state if fewer than 2 surfers
+- Validation: At least 1 surfer must be selected
+
+### 13.4 API Specification
+
+#### Endpoint
+```
+POST /api/sessions/{session_id}/merge-surfers
+```
+
+#### Request Body
+```json
+{
+  "surfer_ids": [1, 2, 5]
+}
+```
+
+**Schema**:
+```python
+class MergeSurfersRequest(BaseModel):
+    surfer_ids: List[int]  # min_items=1, unique values
+```
+
+#### Response
+```json
+{
+  "message": "Successfully merged 3 surfers",
+  "merged_surfer_id": 1,
+  "total_events_merged": 12,
+  "surfers_removed": 2
+}
+```
+
+**Schema**:
+```python
+class MergeSurfersResponse(BaseModel):
+    message: str
+    merged_surfer_id: int
+    total_events_merged: int
+    surfers_removed: int
+```
+
+#### Validation Rules
+- Session must exist and user must own it
+- Session status must be "completed"
+- All provided surfer IDs must exist in `session.results_json['surfers']`
+- At least 1 surfer ID must be selected
+- Session must have multiple surfers (not already merged to single)
+
+#### Error Responses
+- `400 Bad Request`: Invalid surfer IDs, session not completed, already single surfer
+- `401 Unauthorized`: Not logged in
+- `403 Forbidden`: Session belongs to different user
+- `404 Not Found`: Session does not exist
+- `422 Validation Error`: Missing required fields, empty surfer_ids array
+
+### 13.5 Data Storage Architecture
+
+#### Two-Layer System
+
+**1. Database (PostgreSQL)**
+- Table: `surfing_sessions`
+- Column: `results_json` (JSONB type)
+- Structure:
+```json
+{
+  "surfers": [
+    {
+      "id": 1,
+      "total_maneuvers": 8,
+      "events": [...],
+      "pictures": [...]
+    }
+  ],
+  "output_video": "/data/output/{user_id}/{session_id}/output.mp4"
+}
+```
+
+**2. Filesystem**
+- Per-surfer directories: `/data/output/{user_id}/{session_id}/elements/{surfer_id}/`
+- Contains:
+  - `maneuvers.json` - Event data for this surfer
+  - `pictures/` - PNG frame captures
+
+**Important**: The merge operation modifies the database `results_json` column (which is already aggregated data), NOT the filesystem JSON files. Filesystem files are only deleted, never read during merge.
+
+### 13.6 Merge Algorithm
+
+#### Step 1: Data Extraction
+- Extract all events from selected surfers in `results_json['surfers']`
+- Collect all picture paths from selected surfers
+
+#### Step 2: Chronological Sorting
+- Sort events by `timestamp` (primary key)
+- Use `frame` number as fallback for ties
+- This ensures chronologically accurate merged timeline
+
+**Example**:
+```
+Surfer 1: [event@3.5s, event@8.3s]
+Surfer 2: [event@5.0s, event@10.0s]
+→ Merged: [event@3.5s, event@5.0s, event@8.3s, event@10.0s]
+```
+
+#### Step 3: Merged Surfer Object
+- Use lowest selected surfer ID as merged ID (intuitive, preserves familiar numbering)
+- Create merged surfer:
+```json
+{
+  "id": 1,
+  "total_maneuvers": 8,
+  "events": [...],  // Chronologically sorted
+  "pictures": [...],  // From all selected surfers
+  "merged_from": [1, 2],  // Tracking metadata
+  "merged_at": "2025-11-25T19:30:00Z"
+}
+```
+
+#### Step 4: Reconstruct results_json
+- Build new surfers array: [merged_surfer] + [unselected_surfers]
+- Add metadata:
+```json
+{
+  "surfers": [...],
+  "merged": true,
+  "original_surfer_count": 3,
+  "output_video": "..."
+}
+```
+
+### 13.7 File Operations
+
+#### Strategy
+- Keep selected surfer directories intact
+- Delete unselected surfer directories
+
+#### Process
+1. For each surfer ID NOT in selected list:
+   - Delete directory: `/data/output/{user_id}/{session_id}/elements/{surfer_id}/`
+   - Includes all pictures and maneuvers.json
+2. Picture paths in JSON already contain full absolute paths - no updates needed
+3. Log deletions and continue on file errors (DB update is priority)
+
+**Example**:
+```
+Before: elements/1/, elements/2/, elements/3/
+Selected: [1, 2]
+After: elements/1/, elements/2/ (kept), elements/3/ (deleted)
+```
+
+### 13.8 Database Transaction
+
+#### Atomic Operation Order
+1. **Validate** all inputs (fail fast)
+2. **Prepare** merged data structure in memory
+3. **Delete** unselected surfer files (irreversible, but non-critical)
+4. **Update** `results_json` column atomically
+5. **Commit** transaction
+
+#### Error Handling
+- File deletion failures: Log warning, continue (data consistency in DB is priority)
+- Database commit failure: Rollback, return 500 error
+- Validation errors: Return 400 with specific message before any mutations
+
+### 13.9 Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| All surfers selected | Valid - merge all into single surfer |
+| 0 surfers selected | 422 validation error (Pydantic `min_items=1`) |
+| Invalid surfer IDs | 400 error with message listing invalid IDs |
+| Single surfer remaining | Can still re-merge if >1 surfer exists |
+| Session still processing | 400 error: "Cannot merge - still processing" |
+| File deletion fails | Log error, continue with DB update |
+| User selects 1 of 5 surfers | Valid - keep selected, remove other 4 |
+
+### 13.10 Re-merging Support
+
+**Scenario**: User makes mistake in first merge, wants to correct
+
+**Support**: Yes, if multiple surfers still exist
+- If user merged incorrectly, they can merge again
+- Example: Session has surfers [1, 2, 3] → User merges [1, 2] → Now has [1, 3] → Can merge again if needed
+
+**Limitation**: Cannot undo a merge (files permanently deleted)
+
+### 13.11 Implementation Files
+
+#### Backend
+- `/api/routers/sessions.py` - Add POST endpoint for merge
+- `/api/services/surfer_merge_service.py` - **NEW** - Core merge logic
+- `/api/schemas/session.py` - Add request/response schemas
+
+#### Frontend
+- `/website/src/app/sessions/[id]/page.tsx` - Add "Identify Yourself" button
+- `/website/src/components/SurferIdentificationModal.tsx` - **NEW** - Modal UI
+- `/website/src/components/AuthenticatedImage.tsx` - **NEW** - Extract reusable component
+- `/website/src/lib/api-client.ts` - Add `mergeSurfers()` method
+
+### 13.12 Data Transformation Example
+
+**Before Merge**:
+```json
+{
+  "surfers": [
+    {
+      "id": 1,
+      "total_maneuvers": 3,
+      "events": [
+        {"frame": 45, "timestamp": 1.5, "maneuver_type": "bottom_turn", ...},
+        {"frame": 120, "timestamp": 4.0, "maneuver_type": "snap", ...},
+        {"frame": 200, "timestamp": 6.7, "maneuver_type": "cutback", ...}
+      ],
+      "pictures": ["/data/output/user123/sess456/elements/1/pictures/45.png", ...]
+    },
+    {
+      "id": 2,
+      "total_maneuvers": 5,
+      "events": [
+        {"frame": 250, "timestamp": 8.3, "maneuver_type": "bottom_turn", ...},
+        {"frame": 310, "timestamp": 10.3, "maneuver_type": "snap", ...},
+        ...
+      ],
+      "pictures": ["/data/output/user123/sess456/elements/2/pictures/250.png", ...]
+    },
+    {
+      "id": 3,
+      "total_maneuvers": 2,
+      "events": [...],
+      "pictures": [...]
+    }
+  ],
+  "output_video": "/data/output/user123/sess456/output.mp4"
+}
+```
+
+**After Merge (selecting surfers 1 and 2)**:
+```json
+{
+  "surfers": [
+    {
+      "id": 1,
+      "total_maneuvers": 8,
+      "events": [
+        {"frame": 45, "timestamp": 1.5, "maneuver_type": "bottom_turn", ...},
+        {"frame": 120, "timestamp": 4.0, "maneuver_type": "snap", ...},
+        {"frame": 200, "timestamp": 6.7, "maneuver_type": "cutback", ...},
+        {"frame": 250, "timestamp": 8.3, "maneuver_type": "bottom_turn", ...},
+        {"frame": 310, "timestamp": 10.3, "maneuver_type": "snap", ...},
+        ...
+      ],
+      "pictures": [
+        "/data/output/user123/sess456/elements/1/pictures/45.png",
+        "/data/output/user123/sess456/elements/2/pictures/250.png",
+        ...
+      ],
+      "merged_from": [1, 2],
+      "merged_at": "2025-11-25T19:30:00Z"
+    }
+  ],
+  "merged": true,
+  "original_surfer_count": 3,
+  "output_video": "/data/output/user123/sess456/output.mp4"
+}
+```
+
+**Filesystem Changes**:
+- `/data/output/user123/sess456/elements/1/` - KEPT
+- `/data/output/user123/sess456/elements/2/` - KEPT
+- `/data/output/user123/sess456/elements/3/` - DELETED (surfer 3 was not selected)
+
+---
+
+## 14. Future Enhancements
 
 - **Social Features**: Share sessions, follow other surfers, leaderboards
 - **Advanced Analytics**: Compare sessions, track improvement over time
