@@ -908,7 +908,7 @@ After: elements/1/, elements/2/ (kept), elements/3/ (deleted)
 
 ## 14. Future Enhancements
 
-- **Social Features**: Share sessions, follow other surfers, leaderboards
+- **Social Features**: Share sessions, follow other surfers
 - **Advanced Analytics**: Compare sessions, track improvement over time
 - **Mobile App**: React Native app for on-the-go uploads
 - **Live Streaming**: Process live surf competitions
@@ -918,6 +918,191 @@ After: elements/1/, elements/2/ (kept), elements/3/ (deleted)
 - **Collaborative Features**: Coaches can review and comment on sessions
 - **Payment Integration**: Premium features, pay-per-processing model
 - **Export Options**: Export to social media, create highlight reels
+
+---
+
+## 15. Gamification Features
+
+### 15.1 Session Scoring System
+
+**Purpose**: Provide quantitative performance metrics to track surfing improvement over time.
+
+**Score Formula**:
+```
+score = active_session_duration × total_maneuver_count
+```
+
+Where:
+- **active_session_duration** = Time from first maneuver to last maneuver (seconds)
+- **total_maneuver_count** = Sum of all detected maneuvers across all surfers
+
+**Characteristics**:
+- Simple, understandable metric
+- Rewards both session length and activity level
+- Automatically recalculated after surfer merging
+- All maneuvers weighted equally (turns, snaps, cutbacks)
+
+**Example**:
+- Session duration: 15 minutes (900 seconds)
+- Maneuvers detected: 12
+- Score: 900 × 12 = 10,800 points
+
+### 15.2 Leaderboards & Rankings
+
+**Purpose**: Encourage engagement through friendly competition and goal-setting.
+
+**Ranking Periods**:
+- **Daily Rankings**: Reset at midnight UTC, tracks today's performance
+- **Monthly Rankings**: Calendar month-based, full month comparison
+- **Yearly Rankings**: Calendar year-based, long-term achievement tracking
+
+**Leaderboard Structure**:
+- Top 10 positions displayed per period
+- User's current rank always shown (even if outside top 10)
+- Ties handled with dense ranking (users with equal scores share rank)
+
+**Display Information**:
+- Rank position (#1 - #10)
+- User name/alias
+- Total score for period
+- Number of sessions completed
+- Visual badges for top 3 (gold/silver/bronze)
+
+**Update Strategy**:
+- Real-time: Score updates immediately when session completes
+- Scheduled: Rankings recalculated daily at midnight for consistency
+
+### 15.3 Video Player Integration
+
+**Purpose**: Allow users to review their surf session footage directly within the app.
+
+**Features**:
+- Embedded HTML5 video player with standard controls (play, pause, seek, volume)
+- Authenticated video streaming (requires login)
+- HTTP range request support for smooth seeking
+- Shows annotated video with bounding boxes, pose overlays, and ID labels
+
+**Location**:
+- Session detail page (`/sessions/{id}`)
+- Positioned side-by-side with session summary (desktop)
+- Stacked layout on mobile devices
+- Appears above the maneuver timeline
+
+**Technical Requirements**:
+- Video format: MP4 (H.264 codec)
+- Streaming: Byte-range requests for progressive download
+- Authorization: Bearer token validation on video file requests
+
+### 15.4 Video Reprocessing After Merge
+
+**Purpose**: Ensure output video matches merged surfer data by removing unselected surfers from overlays.
+
+**Behavior**:
+When a user merges multiple surfer identities:
+
+1. **Automatic Trigger**: Reprocessing starts immediately after merge completes
+2. **User Experience**:
+   - Loading modal with progress message
+   - Estimated wait time: ~30 seconds
+   - Page auto-refreshes when complete
+3. **Video Changes**:
+   - Overlays (bounding boxes, pose skeletons, ID labels) only shown for merged surfer ID
+   - Unselected surfers completely removed from video
+   - Original footage unchanged
+
+**Technical Process**:
+1. Read saved tracking data (frame-by-frame detections)
+2. Filter overlays to only show selected surfer IDs
+3. Redraw entire video with filtered overlays
+4. Replace original output.mp4 with new version
+
+**Performance**:
+- Faster than full reprocessing (no detection/tracking needed)
+- Uses pre-computed tracking data from initial processing
+- Average reprocessing time: 20-40 seconds depending on video length
+
+### 15.5 Dashboard Layout Redesign
+
+**Purpose**: Improve information density and provide quick access to both personal sessions and competitive rankings.
+
+**Layout Structure**:
+
+**Desktop (≥1024px width)**:
+```
+┌─────────────────────────────────────────────┐
+│ Header (Logo, User, Navigation)             │
+└─────────────────────────────────────────────┘
+┌──────────────────────┬──────────────────────┐
+│ YOUR SESSIONS (60%)  │ RANKINGS (40%)       │
+│ ─────────────────    │ ──────────────────   │
+│ Upload Video Button  │ Period Tabs          │
+│                      │ Daily/Monthly/Yearly │
+│ [Session Cards]      │                      │
+│ - Location & Date    │ Your Rank Highlight  │
+│ - Status Badge       │                      │
+│ - Surfer Count       │ Top 10 Leaderboard   │
+│ - Score Display      │ #1 Gold Badge        │
+│ - View Results Link  │ #2 Silver Badge      │
+│                      │ #3 Bronze Badge      │
+│ [Pagination]         │ #4-10 Rankings       │
+│                      │                      │
+└──────────────────────┴──────────────────────┘
+```
+
+**Mobile (<1024px width)**:
+- Single column, full-width layout
+- Rankings shown first (above sessions)
+- Collapsible sections for better navigation
+
+**Session Cards Enhancement**:
+- Add score display beneath surfer count
+- Format: "Score: 10,800 pts"
+- Only shown for completed sessions
+
+**Rankings Widget**:
+- Tabbed interface for period selection
+- User's rank highlighted with different background
+- Scrollable list if user rank is outside top 10
+- Auto-refresh when period changes
+
+### 15.6 Scoring Integration Points
+
+**Score Calculation Triggers**:
+
+1. **Session Completion** (after video processing):
+   - Parse results_json to extract events
+   - Calculate duration: `last_event_timestamp - first_event_timestamp`
+   - Count total maneuvers across all surfers
+   - Compute score and save to database
+   - Update user rankings for all periods
+
+2. **After Surfer Merge**:
+   - Recalculate score with merged surfer data
+   - Update database
+   - Trigger ranking updates
+   - Initiate video reprocessing
+
+**Data Storage**:
+- `score` column added to `surfing_sessions` table (Float, indexed)
+- `session_rankings` table for aggregated period scores (user_id, period, total_score, rank)
+
+### 15.7 Privacy & Security Considerations
+
+**Leaderboard Privacy**:
+- Only displays user name/alias (no email or personal data)
+- Users can opt to use anonymous alias in profile settings
+- User can choose to hide from public leaderboards (future enhancement)
+
+**Video Access Control**:
+- Videos only accessible by session owner
+- All video requests require authentication
+- Session ID validated against user_id before serving file
+- No public video sharing (without explicit share feature)
+
+**Score Integrity**:
+- Scores calculated server-side (not client-provided)
+- Based on tracker output (no user manipulation)
+- Historical scores preserved (no retroactive changes)
 
 ---
 

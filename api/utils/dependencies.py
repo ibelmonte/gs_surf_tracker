@@ -1,7 +1,7 @@
 """
 FastAPI dependency functions.
 """
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -13,6 +13,7 @@ from utils.security import decode_token
 
 # Security scheme for JWT bearer tokens
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
@@ -88,3 +89,41 @@ def get_current_confirmed_user(
             detail="Email not confirmed. Please confirm your email to access this resource.",
         )
     return current_user
+
+
+def get_optional_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """
+    Dependency to optionally get the current authenticated user from JWT token.
+    Returns None if no token is provided or if token is invalid.
+
+    This allows endpoints to be accessed with or without authentication.
+    """
+    if credentials is None:
+        return None
+
+    token = credentials.credentials
+    payload = decode_token(token)
+
+    if payload is None:
+        return None
+
+    # Check token type
+    if payload.get("type") != "access":
+        return None
+
+    # Extract user ID from token
+    user_id_str: Optional[str] = payload.get("sub")
+    if user_id_str is None:
+        return None
+
+    try:
+        user_id = UUID(user_id_str)
+    except ValueError:
+        return None
+
+    # Get user from database
+    user = db.query(User).filter(User.id == user_id).first()
+    return user

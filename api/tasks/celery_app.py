@@ -2,6 +2,7 @@
 Celery application configuration.
 """
 from celery import Celery
+from celery.schedules import crontab
 from config import settings
 
 # Create Celery app
@@ -9,7 +10,7 @@ celery_app = Celery(
     "surf_tracker",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["tasks.video_processing"]  # Include task modules
+    include=["tasks.video_processing", "tasks.ranking_updates", "tasks.video_reprocessing"]  # Include task modules
 )
 
 # Celery configuration
@@ -28,6 +29,14 @@ celery_app.conf.update(
 
 # Optional: Configure result expiration
 celery_app.conf.result_expires = 3600  # Results expire after 1 hour
+
+# Celery Beat schedule for periodic tasks
+celery_app.conf.beat_schedule = {
+    "recalculate-all-rankings-daily": {
+        "task": "tasks.recalculate_all_rankings",
+        "schedule": crontab(hour=0, minute=0),  # Run daily at midnight UTC
+    },
+}
 
 if __name__ == "__main__":
     celery_app.start()

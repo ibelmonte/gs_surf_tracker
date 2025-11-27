@@ -17,7 +17,7 @@ from config import settings
 from database import Base
 
 # Import all models so they're registered with SQLAlchemy
-from models import User, Profile, SurfingSession
+from models import User, Profile, SurfingSession, SessionRanking
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

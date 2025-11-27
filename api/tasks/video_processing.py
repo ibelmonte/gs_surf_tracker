@@ -12,6 +12,8 @@ from tasks.celery_app import celery_app
 from database import SessionLocal
 from models import SurfingSession
 from schemas import SessionStatus
+from services.scoring_service import ScoringService
+from services.ranking_service import RankingService
 
 
 @celery_app.task(bind=True, name="tasks.process_video")
@@ -69,16 +71,29 @@ def process_video(self, session_id: str):
         # Parse results
         results = parse_tracker_results(output_dir)
 
+        # Calculate session score
+        score = ScoringService.calculate_session_score(results)
+        print(f"[INFO] Calculated session score: {score}")
+
         # Update session with results
         session.status = SessionStatus.COMPLETED
         session.output_path = str(output_dir)
         session.results_json = results
+        session.score = score
         session.completed_at = datetime.utcnow()
         db.commit()
 
+        # Update rankings for all periods (daily, monthly, yearly)
+        try:
+            RankingService.update_all_periods_for_session(db, session)
+            print(f"[INFO] Updated rankings for session {session_id}")
+        except Exception as e:
+            print(f"[WARN] Failed to update rankings: {e}")
+            # Don't fail the entire task if ranking update fails
+
         print(f"[INFO] Video processing completed for session {session_id}")
 
-        return {"status": "completed", "session_id": session_id}
+        return {"status": "completed", "session_id": session_id, "score": score}
 
     except Exception as e:
         print(f"[ERROR] Video processing failed for session {session_id}: {e}")

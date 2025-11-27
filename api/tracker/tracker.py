@@ -196,8 +196,11 @@ else:
 # OUTPUT VIDEO WRITER
 # -----------------------------------------------------------
 
+# Write to temporary file with mp4v codec (OpenCV-compatible)
+# Will re-encode to H.264 using ffmpeg after processing
+temp_output_path = OUTPUT_VIDEO_PATH.replace(".mp4", "_temp.mp4")
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, fps, (frame_w, frame_h))
+out = cv2.VideoWriter(temp_output_path, fourcc, fps, (frame_w, frame_h))
 
 print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 
@@ -224,6 +227,12 @@ print(f"[INFO] Exporting video → {OUTPUT_VIDEO_PATH}")
 # }
 
 track_states = {}
+
+# Frame-by-frame tracking data for video reprocessing
+# Stores detection data (boxes, landmarks) for each frame to enable
+# regenerating videos with only selected surfer IDs after merging
+tracking_data_frames = []
+
 frame_idx = 0
 start_time = time.time()
 
@@ -666,7 +675,11 @@ while True:
 
     detected_maneuver_this_frame = None  # Track which maneuver was detected
 
+    # Tracking data for this frame (for video reprocessing)
+    frame_detections = []
+
     if not results:
+        tracking_data_frames.append({"frame": frame_idx, "detections": []})
         out.write(frame)
         frame_idx += 1
         continue
@@ -674,6 +687,7 @@ while True:
     result = results[0]
 
     if not result.boxes:
+        tracking_data_frames.append({"frame": frame_idx, "detections": []})
         out.write(frame)
         frame_idx += 1
         continue
@@ -683,6 +697,7 @@ while True:
     ids = result.boxes.id
 
     if ids is None:
+        tracking_data_frames.append({"frame": frame_idx, "detections": []})
         out.write(frame)
         frame_idx += 1
         continue
@@ -984,6 +999,29 @@ while True:
             2,
         )
 
+        # Capture tracking data for this detection (for video reprocessing)
+        detection_data = {
+            "track_id": int(track_id),
+            "box": [float(x1), float(y1), float(x2), float(y2)],
+            "maneuver_count": state["maneuver_count"],
+        }
+
+        # Serialize pose landmarks if available
+        if state["pose_landmarks"] is not None:
+            landmarks_list = []
+            for landmark in state["pose_landmarks"].landmark:
+                landmarks_list.append({
+                    "x": float(landmark.x),
+                    "y": float(landmark.y),
+                    "z": float(landmark.z),
+                    "visibility": float(landmark.visibility)
+                })
+            detection_data["pose_landmarks"] = landmarks_list
+        else:
+            detection_data["pose_landmarks"] = None
+
+        frame_detections.append(detection_data)
+
     # Global maneuver flash if any surfer performed a maneuver in this frame
     # Note: detected_maneuver_this_frame is just a boolean, we don't track which specific type here
     # (that info is already in the per-surfer state)
@@ -998,6 +1036,12 @@ while True:
             4,
         )
 
+    # Store tracking data for this frame (for video reprocessing)
+    tracking_data_frames.append({
+        "frame": frame_idx,
+        "detections": frame_detections
+    })
+
     out.write(frame)
     frame_idx += 1
 
@@ -1009,6 +1053,34 @@ while True:
 cap.release()
 out.release()
 pose_detector.close()
+
+# Re-encode video to H.264 for browser compatibility
+print("[INFO] Re-encoding video to H.264 for browser compatibility...")
+try:
+    ffmpeg_cmd = [
+        'ffmpeg', '-y',  # Overwrite output file
+        '-i', temp_output_path,  # Input file (mp4v)
+        '-c:v', 'libx264',  # H.264 codec
+        '-preset', 'medium',  # Encoding speed/quality trade-off
+        '-crf', '23',  # Constant Rate Factor (quality, 18-28 is good)
+        '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
+        '-movflags', '+faststart',  # Enable fast start for web streaming
+        OUTPUT_VIDEO_PATH  # Output file
+    ]
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+
+    if result.returncode == 0:
+        # Remove temporary file
+        os.remove(temp_output_path)
+        print("[INFO] Video successfully re-encoded to H.264")
+    else:
+        print(f"[ERROR] ffmpeg failed: {result.stderr}")
+        # Keep the temp file as fallback
+        print(f"[WARN] Using temporary file: {temp_output_path}")
+except Exception as e:
+    print(f"[ERROR] Failed to re-encode video: {e}")
+    # Keep the temp file as fallback
+    print(f"[WARN] Using temporary file: {temp_output_path}")
 
 print("[INFO] Processing per-surfer data...")
 
@@ -1048,3 +1120,21 @@ print(f"[INFO] Final video → {OUTPUT_VIDEO_PATH}")
 print(f"[INFO] Total surfers tracked: {len(track_states)}")
 print(f"[INFO] Surfers with maneuvers: {surfers_with_maneuvers}")
 print(f"[INFO] Surfers removed: {surfers_removed} (inactive: {inactive_surfers})")
+
+# Save tracking data for video reprocessing
+tracking_data_path = os.path.join(OUTPUT_DIR, "tracking_data.json")
+tracking_data = {
+    "video_info": {
+        "fps": fps,
+        "width": frame_w,
+        "height": frame_h,
+        "total_frames": frame_idx,
+        "rotation": rotation
+    },
+    "frames": tracking_data_frames
+}
+
+print("[INFO] Saving tracking data for video reprocessing...")
+with open(tracking_data_path, "w") as f:
+    json.dump(tracking_data, f)
+print(f"[INFO] Tracking data saved → {tracking_data_path}")

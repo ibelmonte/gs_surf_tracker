@@ -1,7 +1,7 @@
 """
 SurfingSession model - stores video processing sessions.
 """
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from database import Base
@@ -28,11 +28,18 @@ class SurfingSession(Base):
     status = Column(String(50), nullable=False, default="pending", index=True)
     # Status options: 'pending', 'processing', 'completed', 'failed'
 
+    # Reprocessing status (for video regeneration after merges)
+    is_reprocessing = Column(String(50), nullable=True, default=None)
+    # Reprocessing status: None (not reprocessing), 'pending', 'processing', 'completed', 'failed'
+
     error_message = Column(Text, nullable=True)
 
     # Output information
     output_path = Column(String(500), nullable=True)
     results_json = Column(JSONB, nullable=True)  # Store tracker results
+
+    # Gamification
+    score = Column(Float, nullable=True, default=0.0, index=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

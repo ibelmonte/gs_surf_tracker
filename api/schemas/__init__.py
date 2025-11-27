@@ -29,6 +29,10 @@ from .session import (
     MergeSurfersRequest,
     MergeSurfersResponse,
 )
+from .ranking import (
+    RankingEntry,
+    LeaderboardResponse,
+)
 
 __all__ = [
     # User schemas
@@ -56,4 +60,7 @@ __all__ = [
     "UploadResponse",
     "MergeSurfersRequest",
     "MergeSurfersResponse",
+    # Ranking schemas
+    "RankingEntry",
+    "LeaderboardResponse",
 ]

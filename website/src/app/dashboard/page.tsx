@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { authApi, sessionsApi } from '@/lib/api-client';
+import { RankingsWidget } from '@/components/RankingsWidget';
 import Link from 'next/link';
 
 interface Session {
@@ -115,68 +116,78 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Main Content */}
+      {/* Main Content - Two Column Layout */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-xl font-semibold text-gray-900">Your Sessions</h2>
-          <button
-            onClick={() => setUploadModal(true)}
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
-          >
-            Upload Video
-          </button>
-        </div>
-
-        {/* Sessions List */}
-        {sessions.length === 0 ? (
-          <div className="text-center py-12 bg-white rounded-lg shadow">
-            <p className="text-gray-600 mb-4">No sessions yet</p>
-            <button
-              onClick={() => setUploadModal(true)}
-              className="text-blue-600 hover:text-blue-700 font-medium"
-            >
-              Upload your first video
-            </button>
-          </div>
-        ) : (
-          <div className="grid gap-4">
-            {sessions.map((session) => (
-              <div
-                key={session.id}
-                className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column: Sessions (60% on desktop) */}
+          <div className="lg:col-span-2">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-semibold text-gray-900">Your Sessions</h2>
+              <button
+                onClick={() => setUploadModal(true)}
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
               >
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h3 className="text-lg font-medium text-gray-900">
-                        {session.location || 'Unknown Location'}
-                      </h3>
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${getStatusColor(session.status)}`}>
-                        {session.status}
-                      </span>
-                    </div>
-                    <p className="text-sm text-gray-600">
-                      {session.session_date || new Date(session.created_at).toLocaleDateString()}
-                    </p>
-                    {session.results_json && session.results_json.surfers && (
-                      <p className="text-sm text-gray-700 mt-2">
-                        {session.results_json.surfers.length} surfer(s) detected
-                      </p>
-                    )}
-                  </div>
-                  {session.status === 'completed' && (
-                    <Link
-                      href={`/sessions/${session.id}`}
-                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
-                    >
-                      View Results →
-                    </Link>
-                  )}
-                </div>
+                Upload Video
+              </button>
+            </div>
+
+            {/* Sessions List */}
+            {sessions.length === 0 ? (
+              <div className="text-center py-12 bg-white rounded-lg shadow">
+                <p className="text-gray-600 mb-4">No sessions yet</p>
+                <button
+                  onClick={() => setUploadModal(true)}
+                  className="text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  Upload your first video
+                </button>
               </div>
-            ))}
+            ) : (
+              <div className="grid gap-4">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <h3 className="text-lg font-medium text-gray-900">
+                            {session.location || 'Unknown Location'}
+                          </h3>
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${getStatusColor(session.status)}`}>
+                            {session.status}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-600">
+                          {session.session_date || new Date(session.created_at).toLocaleDateString()}
+                        </p>
+                        {session.results_json && session.results_json.surfers && (
+                          <p className="text-sm text-gray-700 mt-2">
+                            {session.results_json.surfers.length} surfer(s) detected
+                          </p>
+                        )}
+                      </div>
+                      {session.status === 'completed' && (
+                        <Link
+                          href={`/sessions/${session.id}`}
+                          className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                        >
+                          View Results →
+                        </Link>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        )}
+
+          {/* Right Column: Rankings (40% on desktop) */}
+          <div className="lg:col-span-1">
+            <RankingsWidget />
+          </div>
+        </div>
       </main>
 
       {/* Upload Modal */}

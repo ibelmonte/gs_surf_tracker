@@ -7,7 +7,7 @@ from config import settings
 from database import engine, Base
 
 # Import routers
-from routers import auth, profile, sessions, files
+from routers import auth, profile, sessions, files, rankings
 
 app = FastAPI(
     title="Surf Tracker API",
@@ -36,7 +36,7 @@ async def startup_event():
     # Note: In production, use Alembic migrations instead
     try:
         # Import models to register them
-        from models import User, Profile, SurfingSession
+        from models import User, Profile, SurfingSession, SessionRanking
         Base.metadata.create_all(bind=engine)
         print("[INFO] Database tables initialized")
     except Exception as e:
@@ -83,6 +83,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(profile.router, prefix="/api/profile", tags=["Profile"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(files.router, prefix="/api/files", tags=["Files"])
+app.include_router(rankings.router, prefix="/api/rankings", tags=["Rankings"])
 
 
 if __name__ == "__main__":

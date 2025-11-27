@@ -173,7 +173,26 @@ async def get_session(
             detail="Session not found"
         )
 
-    return session
+    # Build video URL if output exists
+    video_url = None
+    if session.output_path:
+        # Extract the relative path from the output_path
+        # output_path format: /data/output/{user_id}/{session_id}
+        # video URL format: /files/{user_id}/{session_id}/output.mp4
+        # Note: Don't include /api prefix - the apiClient will add it automatically
+        user_id_str = str(session.user_id)
+        session_id_str = str(session.id)
+
+        # Add timestamp query parameter for cache busting
+        # This ensures browsers reload the video after reprocessing
+        timestamp = int(session.updated_at.timestamp())
+        video_url = f"/files/{user_id_str}/{session_id_str}/output.mp4?v={timestamp}"
+
+    # Convert to dict and add video_url
+    response_data = SessionWithResults.model_validate(session)
+    response_data.video_url = video_url
+
+    return response_data
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -305,7 +324,41 @@ async def merge_surfers(
 
         # Update session with merged results
         session.results_json = merged_results
+
+        # Recalculate score after merge
+        from services.scoring_service import ScoringService
+        from services.ranking_service import RankingService
+
+        new_score = ScoringService.calculate_session_score(merged_results)
+        session.score = new_score
+
         db.commit()
+
+        # Update rankings for all periods with new score
+        try:
+            RankingService.update_all_periods_for_session(db, session)
+            print(f"[INFO] Updated rankings after merge for session {session_id}")
+        except Exception as e:
+            print(f"[WARN] Failed to update rankings after merge: {e}")
+
+        # Trigger video reprocessing to show only merged surfers
+        try:
+            from tasks.video_reprocessing import reprocess_video_after_merge
+
+            # Set reprocessing flag before queuing task
+            session.is_reprocessing = 'pending'
+            db.commit()
+
+            reprocess_task = reprocess_video_after_merge.delay(
+                str(session_id),
+                request.surfer_ids
+            )
+            print(f"[INFO] Video reprocessing task queued: {reprocess_task.id}")
+        except Exception as e:
+            print(f"[WARN] Failed to queue video reprocessing: {e}")
+            session.is_reprocessing = 'failed'
+            db.commit()
+            # Don't fail the merge if reprocessing fails to queue
 
         # Get statistics
         stats = SurferMergeService.get_merge_statistics(
@@ -314,7 +367,7 @@ async def merge_surfers(
             deleted_ids
         )
 
-        print(f"[INFO] Surfers merged: session_id={session_id}, surfer_ids={request.surfer_ids}")
+        print(f"[INFO] Surfers merged: session_id={session_id}, surfer_ids={request.surfer_ids}, new_score={new_score}")
 
         return MergeSurfersResponse(**stats)
 

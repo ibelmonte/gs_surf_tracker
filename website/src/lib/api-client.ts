@@ -130,3 +130,24 @@ export const profileApi = {
     return response.data;
   },
 };
+
+// Rankings API
+export const rankingsApi = {
+  getLeaderboard: async (period: 'daily' | 'monthly' | 'yearly', referenceDate?: string) => {
+    const params = referenceDate ? { reference_date: referenceDate } : {};
+    const response = await apiClient.get(`/rankings/leaderboard/${period}`, { params });
+    return response.data;
+  },
+
+  getUserRanking: async (period: 'daily' | 'monthly' | 'yearly', userId: string, referenceDate?: string) => {
+    const params = referenceDate ? { reference_date: referenceDate } : {};
+    const response = await apiClient.get(`/rankings/leaderboard/${period}/user/${userId}`, { params });
+    return response.data;
+  },
+
+  triggerRecalculation: async (period: 'daily' | 'monthly' | 'yearly', referenceDate?: string) => {
+    const params = referenceDate ? { reference_date: referenceDate } : {};
+    const response = await apiClient.post(`/rankings/recalculate/${period}`, null, { params });
+    return response.data;
+  },
+};

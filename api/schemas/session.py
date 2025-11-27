@@ -47,8 +47,10 @@ class SessionResponse(BaseModel):
     location: Optional[str]
     session_date: Optional[str]
     status: SessionStatus
+    is_reprocessing: Optional[str] = None  # 'pending', 'processing', 'failed', or None
     error_message: Optional[str]
     output_path: Optional[str]
+    score: Optional[float] = None
     created_at: datetime
     updated_at: datetime
     started_processing_at: Optional[datetime]
@@ -60,6 +62,7 @@ class SessionResponse(BaseModel):
 class SessionWithResults(SessionResponse):
     """Schema for session with full results."""
     results_json: Optional[Dict[str, Any]]
+    video_url: Optional[str] = None  # URL to stream the output video
 
 
 class SessionListResponse(BaseModel):

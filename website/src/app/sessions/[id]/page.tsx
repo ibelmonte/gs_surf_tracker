@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { sessionsApi } from '@/lib/api-client';
 import { AuthenticatedImage } from '@/components/AuthenticatedImage';
+import { AuthenticatedVideo } from '@/components/AuthenticatedVideo';
 import { SurferIdentificationModal } from '@/components/SurferIdentificationModal';
 import Link from 'next/link';
 
@@ -12,8 +13,10 @@ interface Session {
   location?: string;
   session_date?: string;
   status: string;
+  is_reprocessing?: string | null;  // 'pending', 'processing', 'failed', or null
   created_at: string;
   output_path?: string;
+  video_url?: string;
   results_json?: {
     surfers: Array<{
       id: number;
@@ -52,7 +55,22 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     loadSession();
-  }, [params.id]);
+
+    // Poll for updates if video is being reprocessed
+    let pollInterval: NodeJS.Timeout | null = null;
+
+    if (session?.is_reprocessing) {
+      pollInterval = setInterval(() => {
+        loadSession();
+      }, 3000); // Poll every 3 seconds
+    }
+
+    return () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    };
+  }, [params.id, session?.is_reprocessing]);
 
   const loadSession = async () => {
     try {
@@ -124,23 +142,57 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Summary */}
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-4">Session Summary</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <p className="text-sm text-gray-600">Surfers Detected</p>
-              <p className="text-2xl font-bold text-gray-900">{session.results_json.surfers.length}</p>
+        {/* Video Player and Summary - Side by Side on Desktop */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {/* Video Player */}
+          {session.video_url && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold mb-4">Session Video</h2>
+              <div className="aspect-video bg-black rounded-lg overflow-hidden relative">
+                {session.is_reprocessing ? (
+                  /* Show loading indicator while video is being reprocessed */
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 text-white">
+                    <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+                    <p className="text-lg font-semibold">
+                      {session.is_reprocessing === 'processing' ? 'Reprocessing Video...' :
+                       session.is_reprocessing === 'pending' ? 'Video Reprocessing Queued...' :
+                       session.is_reprocessing === 'failed' ? 'Reprocessing Failed' : 'Processing...'}
+                    </p>
+                    {session.is_reprocessing === 'processing' && (
+                      <p className="text-sm text-gray-400 mt-2">
+                        This may take a few moments
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  /* Show video player when not reprocessing */
+                  <AuthenticatedVideo
+                    src={session.video_url}
+                    className="w-full h-full"
+                  />
+                )}
+              </div>
             </div>
-            <div>
-              <p className="text-sm text-gray-600">Total Maneuvers</p>
-              <p className="text-2xl font-bold text-gray-900">
-                {session.results_json.surfers.reduce((sum, s) => sum + s.total_maneuvers, 0)}
-              </p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">Status</p>
-              <p className="text-2xl font-bold text-green-600">Completed</p>
+          )}
+
+          {/* Summary */}
+          <div className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-lg font-semibold mb-4">Session Summary</h2>
+            <div className="grid grid-cols-1 gap-4">
+              <div>
+                <p className="text-sm text-gray-600">Surfers Detected</p>
+                <p className="text-2xl font-bold text-gray-900">{session.results_json.surfers.length}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Total Maneuvers</p>
+                <p className="text-2xl font-bold text-gray-900">
+                  {session.results_json.surfers.reduce((sum, s) => sum + s.total_maneuvers, 0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Status</p>
+                <p className="text-2xl font-bold text-green-600">Completed</p>
+              </div>
             </div>
           </div>
         </div>
